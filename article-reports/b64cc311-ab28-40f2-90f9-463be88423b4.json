@@ -1,0 +1,48 @@
+{
+  "report_type": "ArticleReport",
+  "source_url": "https://github.com/multica-ai/andrej-karpathy-skills/blob/main/skills/karpathy-guidelines/SKILL.md",
+  "executive_summary": "The Karpathy Guidelines provide a structured approach to coding that aims to minimize common mistakes made by large language models (LLMs). These guidelines emphasize caution over speed and are designed to help developers write, review, and refactor code effectively. The guidelines are divided into four main principles: Think Before Coding, Simplicity First, Surgical Changes, and Goal-Driven Execution. Each principle offers specific advice on how to approach coding tasks, from stating assumptions explicitly to ensuring that every line of code serves a clear purpose. The guidelines encourage developers to focus on simplicity, avoid unnecessary complexity, and define clear success criteria for their tasks.",
+  "trends": [
+    {
+      "id": "article_karpathy_guidelines",
+      "topic": "Karpathy Guidelines for Reducing LLM Coding Mistakes",
+      "quality_score": 8.5,
+      "sentiment": "bullish",
+      "engagement_prediction": "high",
+      "lifecycle": "emerging",
+      "tiktok_angles": [
+        {
+          "format": "educational_breakdown",
+          "hook_line": "Are you making these common coding mistakes? Karpathy's guidelines can help!"
+        },
+        {
+          "format": "hot_take",
+          "hook_line": "Why simplicity beats complexity in coding: Karpathy's take!"
+        },
+        {
+          "format": "tutorial",
+          "hook_line": "Master coding with Karpathy's four-step guideline!"
+        }
+      ],
+      "cleaned_content": "# Karpathy Guidelines for Reducing LLM Coding Mistakes\n\nThe Karpathy Guidelines are a set of behavioral guidelines aimed at reducing common coding mistakes made by large language models (LLMs). These guidelines are derived from observations by Andrej Karpathy, a prominent figure in the AI and machine learning community. The guidelines are designed to be used when writing, reviewing, or refactoring code, with a focus on avoiding overcomplication, making precise changes, surfacing assumptions, and defining verifiable success criteria.\n\n## Key Principles\n\n### 1. Think Before Coding\n\nThis principle emphasizes the importance of not making assumptions and not hiding confusion. Before implementing any code, developers should:\n\n- Explicitly state their assumptions. If there is uncertainty, they should ask questions.\n- Present multiple interpretations if they exist, rather than silently choosing one.\n- Highlight simpler approaches if they are available and push back when necessary.\n- Stop and clarify anything that is unclear by naming the confusion and asking questions.\n\n### 2. Simplicity First\n\nThe guideline here is to write the minimum code necessary to solve the problem, avoiding speculative features or unnecessary complexity. Developers should:\n\n- Avoid adding features that were not requested.\n- Refrain from creating abstractions for single-use code.\n- Not add \"flexibility\" or \"configurability\" unless specifically requested.\n- Avoid error handling for scenarios that are impossible.\n- Rewrite code if it can be simplified significantly.\n\nThe test for simplicity is whether a senior engineer would consider the code overcomplicated.\n\n### 3. Surgical Changes\n\nWhen editing existing code, the focus should be on making only the necessary changes. Developers should:\n\n- Avoid \"improving\" adjacent code, comments, or formatting unless necessary.\n- Not refactor code that isn't broken.\n- Match the existing style of the code, even if they would prefer a different style.\n- Mention unrelated dead code but not delete it unless asked.\n\nIf changes create unused imports, variables, or functions, developers should remove only those that their changes made unnecessary.\n\n### 4. Goal-Driven Execution\n\nThis principle involves defining clear success criteria and iterating until those criteria are met. Developers should:\n\n- Transform tasks into verifiable goals, such as writing tests for invalid inputs and ensuring they pass.\n- For multi-step tasks, outline a brief plan with steps and verification checks.\n\nStrong success criteria allow developers to work independently, while weak criteria require constant clarification.\n\n## Conclusion\n\nThe Karpathy Guidelines provide a structured approach to coding that prioritizes simplicity, clarity, and precision. By following these guidelines, developers can reduce common coding mistakes and improve the quality of their code. These principles are particularly useful for those working with LLMs, where the risk of overcomplication and error is high.",
+      "key_data_points": [
+        "Andrej Karpathy's observations on LLM coding pitfalls",
+        "Guidelines emphasize caution over speed",
+        "Four main principles: Think Before Coding, Simplicity First, Surgical Changes, Goal-Driven Execution",
+        "Guidelines bias toward caution over speed",
+        "MIT License"
+      ],
+      "target_audience": [
+        "developers",
+        "tech_enthusiasts",
+        "students",
+        "startup_founders"
+      ]
+    }
+  ],
+  "content_calendar_suggestions": [
+    "Exploring the Karpathy Guidelines for Better Coding Practices",
+    "How to Simplify Your Code: Lessons from Karpathy",
+    "Implementing Goal-Driven Execution in Software Development"
+  ]
+}

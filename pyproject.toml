@@ -1,0 +1,85 @@
+[project]
+name = "trending-scanner"
+version = "0.2.0"
+description = "AI-powered HackerNews technology trend scanner for TikTok content"
+requires-python = ">=3.11"
+dependencies = [
+    # Web framework
+    "fastapi>=0.115.0,<1.0",
+    "uvicorn[standard]>=0.32.0",
+    "pydantic>=2.10.0",
+    "pydantic-settings>=2.6.0",
+
+    # LangGraph / LangChain
+    "langgraph>=1.0.0,<2.0",
+    "langchain-openai>=0.3.0",
+    "langchain-core>=0.3.0",
+    "langgraph-checkpoint-postgres>=2.0.0",
+
+    # Database
+    "sqlalchemy[asyncio]>=2.0.35",
+    "asyncpg>=0.30.0",
+    "alembic>=1.14.0",
+
+    # Redis
+    "redis[hiredis]>=5.2.0",
+
+    # HTTP client (for HackerNews API)
+    "httpx>=0.28.0",
+
+    # Web scraping
+    "firecrawl-py>=1.0.0",
+
+    # Utilities
+    "tenacity>=9.0.0",
+    "structlog>=24.4.0",
+    "apscheduler>=3.10.0",
+
+    # Cloud storage (S3 for production)
+    "boto3>=1.35.0",
+
+    # Cloudinary (media hosting for generated images and video clips)
+    "cloudinary>=1.40",
+
+    # Video Clipper Agent dependencies
+    "assemblyai>=0.37.0",
+    "yt-dlp>=2024.1.0",
+    "arq>=0.25.0",
+
+    # Smart reframe (Autocrop-vertical vendored CLI) dependencies.
+    # torch is installed from the CPU wheel index in the Dockerfile to
+    # avoid pulling the ~800MB CUDA build.
+    # numpy is pinned <2 because torch <2.4 was built against NumPy 1.x
+    # and torch.from_numpy() raises "Numpy is not available" on NumPy 2.
+    "numpy>=1.24,<2",
+    "opencv-python-headless>=4.10",
+    "scenedetect>=0.6.4",
+    "ultralytics>=8.3.0",
+    "torch>=2.0,<2.5",
+    "torchvision>=0.15",
+    "tqdm>=4.66",
+
+    # Encryption (token management)
+    "cryptography>=43.0.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.3.0",
+    "pytest-asyncio>=0.24.0",
+    "pytest-cov>=6.0.0",
+    "ruff>=0.8.0",
+    "mypy>=1.13.0",
+]
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+
+[tool.setuptools.packages.find]
+include = ["app*"]
+exclude = ["alembic*"]
