@@ -27,4 +27,6 @@ COPY . .
 
 EXPOSE 8000
 
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]
+# Apply Alembic migrations before serving so the `ai.*` schema/tables exist.
+# (These tables are owned by ai-service; the NestJS backend only reads them.)
+CMD ["sh", "-c", "alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port 8000"]
