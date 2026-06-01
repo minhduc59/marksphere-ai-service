@@ -18,7 +18,8 @@ dependencies = [
 
     # Database
     "sqlalchemy[asyncio]>=2.0.35",
-    "asyncpg>=0.30.0",
+    "asyncpg>=0.30.0",          # async driver — used by the app at runtime
+    "psycopg2-binary>=2.9",     # sync driver — used by Alembic migrations
     "alembic>=1.14.0",
 
     # Redis
