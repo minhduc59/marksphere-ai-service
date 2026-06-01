@@ -1,13 +1,31 @@
 from functools import lru_cache
+from urllib.parse import quote_plus
 
+from pydantic import model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 
-    # Database
+    # Database — either pass DATABASE_URL directly, or pass discrete DB_* vars
+    # (as ECS does) and let the validator below assemble the URL.
     DATABASE_URL: str = "postgresql+asyncpg://scanner:scanner_pass@localhost:5432/trending_scanner"
+    DB_HOST: str | None = None
+    DB_PORT: str | None = None
+    DB_USER: str | None = None
+    DB_PASSWORD: str | None = None
+    DB_NAME: str | None = None
+
+    @model_validator(mode="after")
+    def _assemble_database_url(self) -> "Settings":
+        if self.DB_HOST and self.DB_USER and self.DB_PASSWORD and self.DB_NAME:
+            port = self.DB_PORT or "5432"
+            self.DATABASE_URL = (
+                f"postgresql+asyncpg://{quote_plus(self.DB_USER)}:{quote_plus(self.DB_PASSWORD)}"
+                f"@{self.DB_HOST}:{port}/{self.DB_NAME}"
+            )
+        return self
 
     # Redis
     REDIS_URL: str = "redis://localhost:6379/0"
