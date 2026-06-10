@@ -1,5 +1,5 @@
 from contextlib import asynccontextmanager
-from pathlib import Path
+from zoneinfo import ZoneInfo
 
 import redis.asyncio as aioredis
 import structlog
@@ -7,14 +7,10 @@ from apscheduler.jobstores.memory import MemoryJobStore
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.staticfiles import StaticFiles
-
 from app.config import get_settings
 
 logger = structlog.get_logger()
 settings = get_settings()
-
-BASE_DIR = Path(__file__).resolve().parent.parent  # ai-service/
 
 
 @asynccontextmanager
@@ -56,15 +52,51 @@ async def lifespan(app: FastAPI):
     scheduler = AsyncIOScheduler(
         jobstores=jobstores,
         job_defaults={"coalesce": True, "max_instances": 1},
+        timezone=ZoneInfo(settings.TIMEZONE),
     )
     scheduler.start()
     app.state.scheduler = scheduler
     logger.info("APScheduler started")
 
+    # Register recurring scan schedules as cron jobs.
+    from app.services.scan_scheduler import load_schedules, set_scheduler
+
+    set_scheduler(scheduler)
+    try:
+        await load_schedules(scheduler)
+    except Exception as e:
+        logger.warning("Failed to load scan schedules", error=str(e))
+
+    # Recover stuck runs. When scans run in-process (FastAPI BackgroundTasks),
+    # every non-terminal run is orphaned by this restart, so fail them all
+    # (max_age 0). When scans are dispatched to the ARQ worker they survive an
+    # ai-service restart, so fall back to the age threshold and let the periodic
+    # sweep catch genuine hangs. Either way the periodic sweep below covers runs
+    # that hang while the process is alive.
+    from app.services.run_recovery import recover_stale_runs
+
+    startup_max_age = (
+        0 if not settings.USE_ARQ_FOR_SCANS else settings.SCAN_STALE_TIMEOUT_MINUTES
+    )
+    try:
+        await recover_stale_runs(max_age_minutes=startup_max_age)
+    except Exception as e:
+        logger.warning("Startup stale-run recovery failed", error=str(e))
+
+    scheduler.add_job(
+        recover_stale_runs,
+        "interval",
+        minutes=5,
+        id="stale-run-recovery",
+        replace_existing=True,
+        kwargs={"max_age_minutes": settings.SCAN_STALE_TIMEOUT_MINUTES},
+    )
+
     yield
 
     # Shutdown
     scheduler.shutdown(wait=False)
+    set_scheduler(None)
     logger.info("APScheduler stopped")
 
     if app.state.redis is not None:
@@ -107,12 +139,6 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*", "X-User-Id", "X-Internal-Api-Key", "X-Request-Id"],
 )
-
-# Static file serving for local development (images, reports, posts)
-# In production, these are served via S3/CloudFront.
-if not settings.is_production:
-    app.mount("/static", StaticFiles(directory=str(BASE_DIR)), name="static")
-
 
 @app.get("/health")
 async def health_check():

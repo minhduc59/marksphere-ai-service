@@ -74,47 +74,83 @@ WORDS = [
     {"text": "test", "start": 6000, "end": 6500},
 ]
 
+# _build_ass takes keyword-only style/layout args after the first 3 positionals.
+# style_key="default" yields outline width 2; play_res 1080×1920 matches the
+# vertical-clip PlayRes assertions.
+
 
 class TestBuildAss:
     def test_contains_script_info_header(self):
-        ass = _build_ass(WORDS, 0, 30000, 24, "#FFFFFF", "#000000", 2)
+        ass = _build_ass(
+            WORDS, 0, 30000,
+            font_name="Inter", font_size=24, color="#FFFFFF", outline_color="#000000",
+            style_key="default", position_key="bottom", play_res_x=1080, play_res_y=1920,
+        )
         assert "[Script Info]" in ass
         assert "PlayResX: 1080" in ass
         assert "PlayResY: 1920" in ass
 
     def test_contains_events_section(self):
-        ass = _build_ass(WORDS, 0, 30000, 24, "#FFFFFF", "#000000", 2)
+        ass = _build_ass(
+            WORDS, 0, 30000,
+            font_name="Inter", font_size=24, color="#FFFFFF", outline_color="#000000",
+            style_key="default", position_key="bottom", play_res_x=1080, play_res_y=1920,
+        )
         assert "[Events]" in ass
         assert "Dialogue:" in ass
 
     def test_words_grouped_correctly(self):
         # 6 words → 2 groups of 3
-        ass = _build_ass(WORDS, 0, 30000, 24, "#FFFFFF", "#000000", 2)
+        ass = _build_ass(
+            WORDS, 0, 30000,
+            font_name="Inter", font_size=24, color="#FFFFFF", outline_color="#000000",
+            style_key="default", position_key="bottom", play_res_x=1080, play_res_y=1920,
+        )
         dialogue_count = ass.count("Dialogue:")
         assert dialogue_count == 2
 
     def test_timestamps_are_relative_to_clip_start(self):
         # Clip starts at 1000ms — first word's timecode should be near 0:00:00.00
-        ass = _build_ass(WORDS, 1000, 30000, 24, "#FFFFFF", "#000000", 2)
+        ass = _build_ass(
+            WORDS, 1000, 30000,
+            font_name="Inter", font_size=24, color="#FFFFFF", outline_color="#000000",
+            style_key="default", position_key="bottom", play_res_x=1080, play_res_y=1920,
+        )
         # The first dialogue should start at 0:00:00.00 (1000-1000=0)
         assert "0:00:00.00" in ass
 
     def test_words_outside_clip_range_excluded(self):
         # Only provide word window 5000-6500 (clip 5000-7000)
-        ass = _build_ass(WORDS, 5000, 7000, 24, "#FFFFFF", "#000000", 2)
+        ass = _build_ass(
+            WORDS, 5000, 7000,
+            font_name="Inter", font_size=24, color="#FFFFFF", outline_color="#000000",
+            style_key="default", position_key="bottom", play_res_x=1080, play_res_y=1920,
+        )
         # "Hello world" (1000-2100ms) should not appear
         assert "Hello" not in ass
         assert "test" in ass
 
     def test_color_applied_in_style(self):
-        ass = _build_ass(WORDS, 0, 30000, 24, "#FF0000", "#000000", 2)
+        ass = _build_ass(
+            WORDS, 0, 30000,
+            font_name="Inter", font_size=24, color="#FF0000", outline_color="#000000",
+            style_key="default", position_key="bottom", play_res_x=1080, play_res_y=1920,
+        )
         # Red in ASS BGR is &H000000FF
         assert "&H000000FF" in ass
 
     def test_font_size_applied(self):
-        ass = _build_ass(WORDS, 0, 30000, 32, "#FFFFFF", "#000000", 2)
+        ass = _build_ass(
+            WORDS, 0, 30000,
+            font_name="Inter", font_size=32, color="#FFFFFF", outline_color="#000000",
+            style_key="default", position_key="bottom", play_res_x=1080, play_res_y=1920,
+        )
         assert ",32," in ass
 
     def test_empty_word_list_produces_empty_dialogue(self):
-        ass = _build_ass([], 0, 30000, 24, "#FFFFFF", "#000000", 2)
+        ass = _build_ass(
+            [], 0, 30000,
+            font_name="Inter", font_size=24, color="#FFFFFF", outline_color="#000000",
+            style_key="default", position_key="bottom", play_res_x=1080, play_res_y=1920,
+        )
         assert "Dialogue:" not in ass

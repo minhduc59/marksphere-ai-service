@@ -10,6 +10,7 @@ from sqlalchemy import select
 
 from app.agents.post_generator.graph import build_post_gen_graph
 from app.agents.post_generator.state import PostGenState
+from app.core.llm_errors import classify_llm_error
 from app.db.models import ScanRun, ScanStatus
 from app.db.session import async_session_factory
 
@@ -36,16 +37,7 @@ def _friendly_post_gen_error(errors: list[dict], total_posts: int = 0) -> str:
 
     label = _NODE_LABELS.get(node, node.replace("_", " "))
 
-    if "insufficient_quota" in raw or "exceeded your current quota" in raw:
-        detail = "OpenAI quota exceeded — check your API billing plan"
-    elif "rate_limit" in raw or "429" in raw:
-        detail = "OpenAI rate limit hit — try again in a few minutes"
-    elif "timeout" in raw or "timed out" in raw:
-        detail = "Request timed out — try again"
-    elif "invalid_api_key" in raw or "api key" in raw:
-        detail = "Invalid OpenAI API key"
-    else:
-        detail = "An unexpected error occurred. Please try again later or contact your administrator for support."
+    detail, _ = classify_llm_error(raw)
 
     extra = f" (+{len(errors) - 1} more)" if len(errors) > 1 else ""
     if total_posts > 0:

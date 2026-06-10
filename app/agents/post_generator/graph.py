@@ -13,6 +13,22 @@ from app.agents.post_generator.nodes import (
 from app.agents.post_generator.state import PostGenState
 
 
+def strategy_router(state: PostGenState) -> str:
+    """Conditional edge: skip generation when strategy produced no content plan.
+
+    A fatal strategy_alignment failure returns an empty content_plan + an error.
+    There is nothing for the downstream generation/image/review nodes to do, so
+    route straight to output_packaging to finalize cleanly instead of walking the
+    whole graph emitting "no posts to process" warnings.
+    """
+    content_plan = state.get("content_plan", [])
+    is_revision = bool(state.get("posts_to_revise"))
+
+    if not content_plan and not is_revision:
+        return "skip"
+    return "generate"
+
+
 def review_router(state: PostGenState) -> str:
     """Conditional edge: route back to content_generation if posts need revision."""
     posts_to_revise = state.get("posts_to_revise", [])
@@ -27,12 +43,15 @@ def build_post_gen_graph() -> StateGraph:
     """Build and compile the Post Generation LangGraph.
 
     Pipeline:
-        START → strategy_alignment → content_generation → image_prompt_creation
+        START → strategy_alignment → [conditional: generate or skip]
+              → content_generation → image_prompt_creation
               → image_generation → auto_review → [conditional: revise or package]
               → output_packaging → END
 
-    The auto_review node routes back to content_generation if any post scores
-    below 7 and revision_count < 2 (max 2 revision cycles).
+    strategy_alignment routes straight to output_packaging when it produced no
+    content plan (fatal failure). The auto_review node routes back to
+    content_generation if any post scores below 7 and revision_count < 2
+    (max 2 revision cycles).
     """
     graph = StateGraph(PostGenState)
 
@@ -46,7 +65,18 @@ def build_post_gen_graph() -> StateGraph:
 
     # Linear edges
     graph.add_edge(START, "strategy_alignment")
-    graph.add_edge("strategy_alignment", "content_generation")
+
+    # Conditional edge: skip straight to packaging when there is no content plan
+    # (fatal strategy failure), otherwise proceed to content generation.
+    graph.add_conditional_edges(
+        "strategy_alignment",
+        strategy_router,
+        {
+            "generate": "content_generation",
+            "skip": "output_packaging",
+        },
+    )
+
     graph.add_edge("content_generation", "image_prompt_creation")
     graph.add_edge("image_prompt_creation", "image_generation")
     graph.add_edge("image_generation", "auto_review")

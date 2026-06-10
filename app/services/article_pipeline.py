@@ -15,7 +15,12 @@ from datetime import datetime, timezone
 
 import structlog
 
+from app.agents.pipeline_runner import (
+    _set_pipeline,
+    finalize_pipeline_run,
+)
 from app.agents.post_generator.runner import run_post_generation
+from app.agents.supervisor import apply_review_and_publish, load_pipeline_cfg_for_owner
 from app.core.storage import get_storage
 from app.db.models import (
     Platform,
@@ -36,6 +41,39 @@ from app.services.article_processor import (
 logger = structlog.get_logger()
 
 ARTICLE_SOURCE_TYPE = "article_url"
+
+
+def _resolve_article_cfg(
+    cfg: dict | None, overrides: dict | None
+) -> dict:
+    """Merge per-request publish overrides onto the saved PipelineConfig.
+
+    Precedence: explicit override → saved config → system default. Returns a dict
+    shaped for ``apply_review_and_publish``.
+    """
+    base = cfg or {}
+    o = overrides or {}
+
+    def pick(key: str, default):
+        if o.get(key) is not None:
+            return o[key]
+        if base.get(key) is not None:
+            return base[key]
+        return default
+
+    return {
+        "require_review": pick("require_review", True),
+        "auto_approve_threshold": pick("auto_approve_threshold", 7.0),
+        "auto_publish": pick("auto_publish", False),
+        "publish_mode": pick("publish_mode", "auto"),
+        "scheduled_publish_time": pick("scheduled_publish_time", None),
+        # Per-request uses `privacy_level`; PipelineConfig stores `default_privacy_level`.
+        "default_privacy_level": (
+            o["privacy_level"]
+            if o.get("privacy_level") is not None
+            else base.get("default_privacy_level", "SELF_ONLY")
+        ),
+    }
 
 
 async def create_scan_for_article(url: str, user_id: uuid.UUID) -> uuid.UUID:
@@ -133,20 +171,24 @@ async def _persist_trend_item(
 
 
 async def run_article_pipeline(
+    pipeline_run_id: uuid.UUID,
     scan_run_id: uuid.UUID,
     url: str,
     options: dict,
     user_id: uuid.UUID,
+    publish_overrides: dict | None = None,
 ) -> None:
     """Background task: crawl → build report → persist → invoke post-gen.
 
-    Errors are recorded on the ScanRun row (status=FAILED, error=<reason>)
-    so the existing WebSocket gateway surfaces them to the frontend
-    automatically via `scan.completed`.
+    Wrapped in a parent ``PipelineRun`` so the run is polled through the unified
+    pipeline status endpoint (scan → generate → publish). Errors are recorded on
+    the ScanRun row (status=FAILED, error=<reason>) and aggregated into the
+    PipelineRun by ``finalize_pipeline_run`` in the ``finally`` block.
     """
     start = time.time()
     logger.info(
         "article_pipeline: starting",
+        pipeline_run_id=str(pipeline_run_id),
         scan_run_id=str(scan_run_id),
         url=url,
         user_id=str(user_id),
@@ -154,6 +196,16 @@ async def run_article_pipeline(
 
     try:
         await _set_status(scan_run_id, ScanStatus.RUNNING)
+        await _set_pipeline(
+            str(pipeline_run_id),
+            status=ScanStatus.RUNNING,
+            stage="scanning",
+            scan_run_id=scan_run_id,
+        )
+        # Light up the Trending Scanner stage while the article is fetched and the
+        # report is built; post-gen's _step_cb advances it from here. "analyzing"
+        # ("Analyze trends") reads correctly for a single article.
+        await _update_step(scan_run_id, "analyzing")
 
         article = await fetch_article(url)
         if detect_paywall(article["body"]):
@@ -182,6 +234,20 @@ async def run_article_pipeline(
             await _update_step(scan_run_id, step)
 
         await run_post_generation(str(scan_run_id), options, str(user_id), step_callback=_step_cb)
+
+        # Apply the same review-gate + auto-publish behaviour as the HackerNews
+        # path. Per-request overrides win; unset fields fall back to the user's
+        # saved PipelineConfig.
+        cfg = await load_pipeline_cfg_for_owner(user_id)
+        resolved = _resolve_article_cfg(cfg, publish_overrides)
+        await apply_review_and_publish(
+            str(scan_run_id), resolved, str(user_id), step_cb=_step_cb
+        )
+
+        # Clear the step indicator so the status UI can settle to "done" (mirrors
+        # run_scan). Error paths intentionally keep current_step to highlight the
+        # failed stage.
+        await _update_step(scan_run_id, "")
         await _set_status(scan_run_id, ScanStatus.COMPLETED, completed=True, only_if_running=True)
 
     except PaywallDetectedError as exc:
@@ -216,3 +282,8 @@ async def run_article_pipeline(
             error="An unexpected error occurred. Please try again later or contact your administrator for support.",
             completed=True,
         )
+    finally:
+        # Aggregate the scan run's terminal status + content/published ids into
+        # the parent PipelineRun so the unified status endpoint settles, on both
+        # the success and error paths.
+        await finalize_pipeline_run(str(pipeline_run_id), str(scan_run_id), start)

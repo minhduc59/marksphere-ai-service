@@ -1,21 +1,26 @@
-"""Phase 3.5: Image Generation — Generate images using OpenAI gpt-image-1.5."""
+"""Phase 3.5: Image Generation — Generate images using FLUX.2-klein on Modal."""
 
 import asyncio
 
 import structlog
 
 from app.agents.post_generator.state import PostGenState
-from app.clients.bfl_client import get_image_client
+from app.clients.modal_client import get_modal_client
 from app.core.cloudinary_uploader import upload_image_bytes
 
 logger = structlog.get_logger()
 
-# Map aspect_ratio strings to OpenAI size strings
-ASPECT_RATIO_SIZE_MAP: dict[str, str] = {
-    "1:1": "1024x1024",
-    "4:5": "1024x1536",
-    "16:9": "1536x1024",
-    "9:16": "1024x1536",
+# Cap concurrent Modal image calls so a large batch doesn't fire hundreds of
+# simultaneous requests and exhaust the model's queue / our rate budget.
+IMAGE_GEN_CONCURRENCY = 6
+
+# Map aspect_ratio strings to (width, height) matching the model's training buckets.
+# TikTok is always portrait (9:16); other ratios included for completeness.
+ASPECT_RATIO_SIZE_MAP: dict[str, tuple[int, int]] = {
+    "1:1":  (1024, 1024),   # square bucket
+    "4:5":  (896, 1152),    # portrait-ish
+    "16:9": (1344, 768),    # landscape_16_9 bucket
+    "9:16": (768, 1344),    # portrait bucket — TikTok native default
 }
 
 
@@ -33,14 +38,15 @@ async def _generate_single_image(
 
     post_id = post.get("post_id", "unknown")
     prompt_text = image_prompt["prompt"]
-    aspect_ratio = image_prompt.get("aspect_ratio", "1:1")
-    size = ASPECT_RATIO_SIZE_MAP.get(aspect_ratio, "1024x1024")
+    aspect_ratio = image_prompt.get("aspect_ratio", "9:16")
+    width, height = ASPECT_RATIO_SIZE_MAP.get(aspect_ratio, (768, 1344))
 
     try:
-        client = get_image_client()
+        client = get_modal_client()
         result = await client.generate_image(
             prompt=prompt_text,
-            size=size,
+            width=width,
+            height=height,
         )
 
         public_id = f"posts/{scan_run_id}/{post_id}"
@@ -65,7 +71,7 @@ async def _generate_single_image(
 
 
 async def image_generation_node(state: PostGenState) -> dict:
-    """Generate images for all posts concurrently using OpenAI gpt-image-1.5."""
+    """Generate images for all posts concurrently using FLUX.2-klein on Modal."""
     generated_posts = state.get("generated_posts", [])
     scan_run_id = state.get("scan_run_id", "")
 
@@ -75,10 +81,13 @@ async def image_generation_node(state: PostGenState) -> dict:
 
     logger.info("image_generation: starting", num_posts=len(generated_posts))
 
-    tasks = [
-        _generate_single_image(post, scan_run_id)
-        for post in generated_posts
-    ]
+    sem = asyncio.Semaphore(IMAGE_GEN_CONCURRENCY)
+
+    async def _bounded(post: dict) -> tuple[dict, dict | None]:
+        async with sem:
+            return await _generate_single_image(post, scan_run_id)
+
+    tasks = [_bounded(post) for post in generated_posts]
     results = await asyncio.gather(*tasks)
 
     updated_posts = []

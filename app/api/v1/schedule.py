@@ -1,10 +1,14 @@
-from fastapi import APIRouter, Depends, HTTPException
+import uuid
+
+from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.api.v1.deps import get_current_user_id
 from app.api.v1.schemas.schedule import ScheduleRequest, ScheduleResponse
 from app.db.models import ScanSchedule
 from app.dependencies import get_session
+from app.services.scan_scheduler import register_schedule
 
 router = APIRouter()
 
@@ -29,15 +33,30 @@ router = APIRouter()
 )
 async def create_schedule(
     request: ScheduleRequest,
+    http_request: Request,
     db: AsyncSession = Depends(get_session),
+    user_id: uuid.UUID = Depends(get_current_user_id),
 ):
     schedule = ScanSchedule(
+        owner_id=user_id,
         cron_expression=request.cron_expression,
         platforms=[p.value for p in request.platforms],
         is_active=request.is_active,
     )
     db.add(schedule)
-    await db.flush()
+    await db.flush()  # populates schedule.id
+
+    if schedule.is_active:
+        scheduler = getattr(http_request.app.state, "scheduler", None)
+        if scheduler is not None:
+            try:
+                register_schedule(
+                    scheduler, str(schedule.id), schedule.cron_expression
+                )
+            except ValueError:
+                raise HTTPException(
+                    status_code=422, detail="Invalid cron expression"
+                )
     return ScheduleResponse.model_validate(schedule)
 
 

@@ -9,6 +9,7 @@ from app.api.v1.posts import router as posts_router
 from app.api.v1.publish import router as publish_router
 from app.api.v1.time_slots import router as time_slots_router
 from app.api.v1.video_tasks import router as video_tasks_router
+from app.api.v1.pipeline import router as pipeline_router
 from app.api.v1.video_clips import router as video_clips_router
 
 v1_router = APIRouter()
@@ -22,3 +23,4 @@ v1_router.include_router(publish_router, prefix="/publish", tags=["publish"])
 v1_router.include_router(time_slots_router, prefix="/time-slots", tags=["time-slots"])
 v1_router.include_router(video_tasks_router, prefix="/video-tasks", tags=["video-tasks"])
 v1_router.include_router(video_clips_router, prefix="/video-clips", tags=["video-clips"])
+v1_router.include_router(pipeline_router, prefix="/pipeline", tags=["pipeline"])

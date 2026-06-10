@@ -20,8 +20,9 @@ class BaseScannerNode(ABC):
         try:
             logger.info("Scanner starting", platform=self.platform)
 
-            # Check rate limit
-            await self.rate_limiter.check(self.platform)
+            # Reserve a rate-limit slot, waiting briefly if other users' scans
+            # are currently saturating the global platform budget.
+            await self.rate_limiter.acquire(self.platform)
 
             # Fetch fresh data
             items = await self.fetch(state.get("options", {}))

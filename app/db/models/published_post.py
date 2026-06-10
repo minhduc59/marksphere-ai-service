@@ -69,6 +69,9 @@ class PublishedPost(Base):
 
     # Error tracking
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # failed_stage names the publish pipeline node that errored
+    # (resolve, schedule, publish, pipeline).
+    failed_stage: Mapped[str | None] = mapped_column(String(50), nullable=True)
     retry_count: Mapped[int] = mapped_column(Integer, default=0)
     api_response: Mapped[dict | None] = mapped_column(JSON, nullable=True)
 
