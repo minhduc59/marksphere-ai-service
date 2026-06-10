@@ -2,6 +2,7 @@ from app.db.models.enums import (
     ContentStatus,
     ContentType,
     EngagementPrediction,
+    PipelinePublishMode,
     Platform,
     PostFormat,
     PublishMode,
@@ -17,6 +18,8 @@ from app.db.models.brand_font import BrandFont
 from app.db.models.caption_template import CaptionTemplate
 from app.db.models.content_post import ContentPost
 from app.db.models.engagement_time_slot import EngagementTimeSlot
+from app.db.models.pipeline_config import PipelineConfig
+from app.db.models.pipeline_run import PipelineRun
 from app.db.models.published_post import PublishedPost
 from app.db.models.scan import ScanRun
 from app.db.models.scan_schedule import ScanSchedule
@@ -34,6 +37,9 @@ __all__ = [
     "ContentType",
     "EngagementPrediction",
     "EngagementTimeSlot",
+    "PipelineConfig",
+    "PipelinePublishMode",
+    "PipelineRun",
     "Platform",
     "PostFormat",
     "PublishMode",

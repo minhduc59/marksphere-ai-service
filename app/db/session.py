@@ -7,8 +7,13 @@ settings = get_settings()
 engine = create_async_engine(
     settings.DATABASE_URL,
     echo=settings.APP_ENV == "development",
-    pool_size=10,
-    max_overflow=20,
+    # Sized for concurrent multi-user scans: each run opens several short-lived
+    # sessions. pool_pre_ping drops stale connections; pool_timeout fails fast
+    # instead of hanging forever when the pool is saturated.
+    pool_size=20,
+    max_overflow=30,
+    pool_pre_ping=True,
+    pool_timeout=30,
 )
 
 async_session_factory = async_sessionmaker(

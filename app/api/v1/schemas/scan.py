@@ -95,3 +95,4 @@ class ScanStatusResponse(BaseModel):
     duration_ms: int | None = None
     error: str | None = None
     current_step: str | None = None
+    published_post_ids: list[str] = []

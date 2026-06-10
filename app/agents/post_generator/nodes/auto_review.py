@@ -5,6 +5,7 @@ import json
 import structlog
 from langchain_core.messages import HumanMessage, SystemMessage
 
+from app.agents.post_generator.batching import run_batches
 from app.agents.post_generator.prompts import AUTO_REVIEW_SYSTEM_PROMPT
 from app.agents.post_generator.state import PostGenState
 from app.clients.openai_client import get_review_llm
@@ -49,94 +50,116 @@ async def auto_review_node(state: PostGenState) -> dict:
             "posts_to_revise": [],
         }
 
+    # Posts that already failed generation are not reviewable; pass them through
+    # with a synthetic non-revision result so they aren't sent for revision.
+    to_review = [p for p in generated_posts if not p.get("_error")]
+    failed_posts = [p for p in generated_posts if p.get("_error")]
+
     logger.info(
         "auto_review: starting",
-        num_posts=len(generated_posts),
+        num_posts=len(to_review),
+        skipped_failed=len(failed_posts),
         revision_round=revision_count,
     )
 
-    # Build review input
-    review_input = []
-    for post in generated_posts:
-        review_input.append({
-            "post_id": post.get("post_id", ""),
-            "format": post.get("format", ""),
-            "caption": post.get("caption", ""),
-            "hashtags": post.get("hashtags", []),
-            "cta": post.get("cta", ""),
-            "target_audience": post.get("target_audience", []),
-            "word_count": post.get("word_count", 0),
-            "trend_title": post.get("trend_title", ""),
-        })
-
     brand_voice = strategy.get("brand_voice", {})
-    user_content = (
-        f"## Posts to Review\n\n{json.dumps(review_input, indent=2)}\n\n"
+    brand_voice_block = (
         f"## Brand Voice Guidelines\n"
         f"Tone: {brand_voice.get('tone', 'professional')}\n"
         f"Personality: {brand_voice.get('personality', [])}\n"
         f"Avoid: {brand_voice.get('avoid', [])}"
     )
-
     llm = get_review_llm()
 
-    try:
-        response = await llm.ainvoke([
-            SystemMessage(content=AUTO_REVIEW_SYSTEM_PROMPT),
-            HumanMessage(content=user_content),
-        ])
+    async def _review_batch(batch: list, idx: int) -> dict:
+        review_input = [
+            {
+                "post_id": post.get("post_id", ""),
+                "format": post.get("format", ""),
+                "caption": post.get("caption", ""),
+                "hashtags": post.get("hashtags", []),
+                "cta": post.get("cta", ""),
+                "target_audience": post.get("target_audience", []),
+                "word_count": post.get("word_count", 0),
+                "trend_title": post.get("trend_title", ""),
+            }
+            for post in batch
+        ]
+        user_content = (
+            f"## Posts to Review\n\n{json.dumps(review_input, indent=2)}\n\n{brand_voice_block}"
+        )
+        try:
+            response = await llm.ainvoke([
+                SystemMessage(content=AUTO_REVIEW_SYSTEM_PROMPT),
+                HumanMessage(content=user_content),
+            ])
+            reviews = _parse_json_response(response.content)
+            if not isinstance(reviews, list):
+                reviews = [reviews]
+            return {"reviews": reviews, "error": None}
+        except Exception as e:
+            logger.error("auto_review: batch failed", batch=idx, error=str(e))
+            # Pass this batch's posts through without revision.
+            return {
+                "reviews": [
+                    {"post_id": p.get("post_id", ""), "weighted_score": 7.0, "needs_revision": False}
+                    for p in batch
+                ],
+                "error": {"node": "auto_review", "error": str(e)},
+            }
 
-        review_results = _parse_json_response(response.content)
-        if not isinstance(review_results, list):
-            review_results = [review_results]
+    batch_results = await run_batches(to_review, _review_batch)
+    review_results: list[dict] = []
+    errors: list[dict] = []
+    for r in batch_results:
+        review_results.extend(r["reviews"])
+        if r["error"]:
+            errors.append(r["error"])
 
-        # Determine which posts need revision
-        posts_to_revise = []
-        for review in review_results:
-            score = review.get("weighted_score", 0)
+    # Determine which posts need revision
+    posts_to_revise = []
+    for review in review_results:
+        score = review.get("weighted_score", 0)
 
-            # Validate/recalculate weighted score from criteria
-            criteria = review.get("criteria_scores", {})
-            if criteria:
-                calculated = sum(
-                    criteria.get(k, 5) * w for k, w in CRITERIA_WEIGHTS.items()
-                )
-                review["weighted_score"] = round(calculated, 2)
-                score = calculated
+        # Validate/recalculate weighted score from criteria
+        criteria = review.get("criteria_scores", {})
+        if criteria:
+            calculated = sum(
+                criteria.get(k, 5) * w for k, w in CRITERIA_WEIGHTS.items()
+            )
+            review["weighted_score"] = round(calculated, 2)
+            score = calculated
 
-            if score < PASSING_SCORE:
-                if revision_count < MAX_REVISIONS:
-                    review["needs_revision"] = True
-                    posts_to_revise.append(review["post_id"])
-                else:
-                    # Max revisions reached — flag for human review
-                    review["needs_revision"] = False
-                    review["flagged_for_human_review"] = True
+        if score < PASSING_SCORE:
+            if revision_count < MAX_REVISIONS:
+                review["needs_revision"] = True
+                posts_to_revise.append(review["post_id"])
             else:
+                # Max revisions reached — flag for human review
                 review["needs_revision"] = False
+                review["flagged_for_human_review"] = True
+        else:
+            review["needs_revision"] = False
 
-        logger.info(
-            "auto_review: completed",
-            passing=len(generated_posts) - len(posts_to_revise),
-            needs_revision=len(posts_to_revise),
-            revision_round=revision_count,
+    # Carry synthetic results for already-failed posts so review_results covers
+    # every post without ever queuing a failed post for revision.
+    for p in failed_posts:
+        review_results.append(
+            {"post_id": p.get("post_id", ""), "weighted_score": 0.0, "needs_revision": False}
         )
 
-        return {
-            "review_results": review_results,
-            "revision_count": revision_count + 1,
-            "posts_to_revise": posts_to_revise,
-        }
+    logger.info(
+        "auto_review: completed",
+        passing=len(to_review) - len(posts_to_revise),
+        needs_revision=len(posts_to_revise),
+        revision_round=revision_count,
+    )
 
-    except Exception as e:
-        logger.error("auto_review: LLM call failed", error=str(e))
-        # On failure, pass all posts through without revision
-        return {
-            "review_results": [
-                {"post_id": p.get("post_id", ""), "weighted_score": 7.0, "needs_revision": False}
-                for p in generated_posts
-            ],
-            "revision_count": revision_count + 1,
-            "posts_to_revise": [],
-            "errors": [{"node": "auto_review", "error": str(e)}],
-        }
+    result: dict = {
+        "review_results": review_results,
+        "revision_count": revision_count + 1,
+        "posts_to_revise": posts_to_revise,
+    }
+    if errors:
+        result["errors"] = errors
+    return result

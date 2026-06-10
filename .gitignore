@@ -28,3 +28,4 @@ reports/
 content/
 posts/
 strategy/
+.mypy_cache/

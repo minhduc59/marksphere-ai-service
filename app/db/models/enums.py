@@ -51,6 +51,7 @@ class ContentStatus(str, enum.Enum):
     FLAGGED_FOR_REVIEW = "flagged_for_review"
     PUBLISHED = "published"
     REGENERATING = "regenerating"
+    FAILED = "failed"
 
 
 class PostFormat(str, enum.Enum):
@@ -100,3 +101,9 @@ class VideoClipStatus(str, enum.Enum):
     REJECTED = "rejected"
     PUBLISHED = "published"
     FAILED = "failed"
+
+
+class PipelinePublishMode(str, enum.Enum):
+    AUTO = "auto"
+    MANUAL = "manual"
+    SCHEDULE = "schedule"

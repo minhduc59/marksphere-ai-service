@@ -5,6 +5,7 @@ import json
 import structlog
 from langchain_core.messages import HumanMessage, SystemMessage
 
+from app.agents.post_generator.batching import run_batches
 from app.agents.post_generator.prompts import IMAGE_PROMPT_SYSTEM_PROMPT
 from app.agents.post_generator.state import PostGenState
 from app.clients.openai_client import get_content_gen_llm
@@ -31,83 +32,83 @@ async def image_prompt_creation_node(state: PostGenState) -> dict:
         logger.warning("image_prompt_creation: no posts to process")
         return {"generated_posts": []}
 
+    # Posts that already failed an earlier stage are skipped (no point spending
+    # an LLM call on them); they pass through unchanged with image_prompt=None.
+    to_process = [p for p in generated_posts if not p.get("_error")]
+
     logger.info(
         "image_prompt_creation: starting",
-        num_posts=len(generated_posts),
+        num_posts=len(to_process),
+        skipped_failed=len(generated_posts) - len(to_process),
         has_human_feedback=bool(human_feedback),
     )
 
-    # Build rich summaries — include full caption so the image LLM can extract
-    # key stats, data points, and takeaways to pack into the image
-    post_summaries = []
-    for post in generated_posts:
-        post_summaries.append({
-            "post_id": post.get("post_id", ""),
-            "format": post.get("format", ""),
-            "trend_title": post.get("trend_title", ""),
-            "caption": post.get("caption", ""),
-            "hashtags": post.get("hashtags", []),
-            "cta": post.get("cta", ""),
-            "target_audience": post.get("target_audience", []),
-        })
-
     system_prompt = IMAGE_PROMPT_SYSTEM_PROMPT
-
-    user_content_parts = [
-        f"Generate image prompts for these {len(post_summaries)} TikTok posts:",
-        json.dumps(post_summaries, indent=2),
-    ]
-    if human_feedback:
-        # When the user rejected the previous image, surface their critique so
-        # the new prompt fixes the specific issue (colors, style, composition,
-        # etc.) instead of producing a similar image.
-        user_content_parts.append(
-            "## Human reviewer feedback on the previous image — address this directly:\n"
-            f"{human_feedback}"
-        )
-    user_content = "\n\n".join(user_content_parts)
-
     llm = get_content_gen_llm()
 
-    try:
-        response = await llm.ainvoke([
-            SystemMessage(content=system_prompt),
-            HumanMessage(content=user_content),
-        ])
+    async def _prompt_batch(batch: list, idx: int) -> dict:
+        post_summaries = [
+            {
+                "post_id": post.get("post_id", ""),
+                "format": post.get("format", ""),
+                "trend_title": post.get("trend_title", ""),
+                "caption": post.get("caption", ""),
+                "hashtags": post.get("hashtags", []),
+                "cta": post.get("cta", ""),
+                "target_audience": post.get("target_audience", []),
+            }
+            for post in batch
+        ]
+        user_content_parts = [
+            f"Generate image prompts for these {len(post_summaries)} TikTok posts:",
+            json.dumps(post_summaries, indent=2),
+        ]
+        if human_feedback:
+            # When the user rejected the previous image, surface their critique so
+            # the new prompt fixes the specific issue (colors, style, composition,
+            # etc.) instead of producing a similar image.
+            user_content_parts.append(
+                "## Human reviewer feedback on the previous image — address this directly:\n"
+                f"{human_feedback}"
+            )
+        try:
+            response = await llm.ainvoke([
+                SystemMessage(content=system_prompt),
+                HumanMessage(content="\n\n".join(user_content_parts)),
+            ])
+            image_prompts = _parse_json_response(response.content)
+            if not isinstance(image_prompts, list):
+                image_prompts = [image_prompts]
+            return {"prompts": image_prompts, "error": None}
+        except Exception as e:
+            logger.error("image_prompt_creation: batch failed", batch=idx, error=str(e))
+            return {"prompts": [], "error": {"node": "image_prompt_creation", "error": str(e)}}
 
-        image_prompts = _parse_json_response(response.content)
-        if not isinstance(image_prompts, list):
-            image_prompts = [image_prompts]
+    batch_results = await run_batches(to_process, _prompt_batch)
 
-        # Merge image prompts into posts by post_id
-        prompts_by_id = {ip["post_id"]: ip for ip in image_prompts}
+    prompts_by_id: dict = {}
+    errors: list[dict] = []
+    for r in batch_results:
+        for ip in r["prompts"]:
+            prompts_by_id[ip.get("post_id", "")] = ip
+        if r["error"]:
+            errors.append(r["error"])
 
-        updated_posts = []
-        for post in generated_posts:
-            post_copy = dict(post)
-            img = prompts_by_id.get(post.get("post_id", ""))
-            if img:
-                # Remove post_id from the image prompt data (it's already on the post)
-                img_data = {k: v for k, v in img.items() if k != "post_id"}
-                post_copy["image_prompt"] = img_data
-            else:
-                post_copy["image_prompt"] = None
-            updated_posts.append(post_copy)
+    # Merge image prompts back into posts by post_id (preserving order). Posts
+    # without a prompt (failed batch or pre-failed) keep image_prompt=None.
+    updated_posts = []
+    for post in generated_posts:
+        post_copy = dict(post)
+        img = prompts_by_id.get(post.get("post_id", ""))
+        if img:
+            post_copy["image_prompt"] = {k: v for k, v in img.items() if k != "post_id"}
+        else:
+            post_copy["image_prompt"] = None
+        updated_posts.append(post_copy)
 
-        logger.info(
-            "image_prompt_creation: completed",
-            prompts_generated=len(image_prompts),
-        )
+    logger.info("image_prompt_creation: completed", prompts_generated=len(prompts_by_id))
 
-        return {"generated_posts": updated_posts}
-
-    except Exception as e:
-        logger.error("image_prompt_creation: LLM call failed", error=str(e))
-        # Keep posts without image prompts rather than failing
-        for post in generated_posts:
-            if "image_prompt" not in post:
-                post["image_prompt"] = None
-        return {
-            "generated_posts": generated_posts,
-            "errors": [{"node": "image_prompt_creation", "error": str(e)}],
-        }
+    result: dict = {"generated_posts": updated_posts}
+    if errors:
+        result["errors"] = errors
+    return result

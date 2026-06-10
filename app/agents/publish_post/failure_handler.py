@@ -89,6 +89,7 @@ async def mark_publish_failed(
             if pub is not None:
                 pub.status = PublishStatus.FAILED
                 pub.error_message = error_message[:2000]
+                pub.failed_stage = stage
                 pub.retry_count = settings.PUBLISH_MAX_RETRIES
                 await db.commit()
     except Exception as exc:

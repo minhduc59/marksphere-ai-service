@@ -22,6 +22,11 @@ MAX_CONCURRENT_FETCHES = 10
 MAX_CONCURRENT_CRAWLS = 5
 CRAWL_TIMEOUT = 15  # seconds per article crawl
 MIN_CONTENT_WORDS = 100
+# Tech filtering + crawl failures drop a large fraction of stories, so we fetch
+# several times the requested item count to reliably reach the target.
+STORY_OVERSAMPLE = 3
+# HN's topstories feed returns up to ~500 IDs; never request more than that.
+MAX_TOP_STORY_IDS = 500
 
 # Technology-related keywords for filtering
 TECH_KEYWORDS = {
@@ -208,12 +213,15 @@ class HackerNewsTool:
     async def fetch_all(self, max_stories: int = 30) -> list[dict]:
         """Fetch top HN stories, crawl articles, filter and return tech items.
 
-        Returns items in the common trend item format, sorted by HN score descending.
-        Max 15 qualifying stories returned.
+        ``max_stories`` is the target number of qualifying items to return.
+        Returns items in the common trend item format, sorted by HN score
+        descending, capped at ``max_stories``.
         """
-        # Step 1: Fetch top story IDs
-        story_ids = await self._fetch_top_story_ids(limit=max_stories)
-        logger.info("HN: fetched story IDs", count=len(story_ids))
+        # Step 1: Fetch top story IDs. Oversample because tech filtering and
+        # crawl failures drop many candidates before we reach the target count.
+        id_fetch_limit = min(MAX_TOP_STORY_IDS, max_stories * STORY_OVERSAMPLE)
+        story_ids = await self._fetch_top_story_ids(limit=id_fetch_limit)
+        logger.info("HN: fetched story IDs", count=len(story_ids), target=max_stories)
 
         # Step 2: Fetch story details in parallel
         sem = asyncio.Semaphore(MAX_CONCURRENT_FETCHES)
@@ -319,9 +327,9 @@ class HackerNewsTool:
             }
             items.append(item)
 
-        # Sort by HN score descending, limit to 15
+        # Sort by HN score descending, cap at the requested target count
         items.sort(key=lambda x: x.get("trending_score", 0), reverse=True)
-        items = items[:15]
+        items = items[:max_stories]
 
         logger.info(
             "HN: pipeline complete",

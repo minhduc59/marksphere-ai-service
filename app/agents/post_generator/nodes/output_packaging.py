@@ -75,6 +75,15 @@ def _build_final_output(state: PostGenState) -> dict:
 
     review_by_id = {r["post_id"]: r for r in review_results}
 
+    # Per-post errors surface from two places: an `_error` marker the
+    # content-generation stage attaches to placeholder posts, and the
+    # image_generation node's error list (keyed by post_id) in state["errors"].
+    image_errors_by_id = {
+        e["post_id"]: e.get("error", "")
+        for e in state.get("errors", [])
+        if e.get("node") == "image_generation" and e.get("post_id")
+    }
+
     # Enrich posts with review data and metadata
     final_posts = []
     for post in posts:
@@ -83,13 +92,35 @@ def _build_final_output(state: PostGenState) -> dict:
 
         posting_insights = strategy.get("posting_insights", {})
 
+        post_error = post.get("_error")
+        # A stale image error from an earlier revision round may linger in the
+        # accumulated errors list; only treat it as a real failure if the post
+        # still has no image (a later round didn't recover it).
+        image_error = (
+            image_errors_by_id.get(post_id) if not post.get("image_path") else None
+        )
+        if post_error:
+            status_str = "failed"
+            failed_stage = post_error.get("stage")
+            error_reason = post_error.get("reason")
+        elif image_error:
+            status_str = "failed"
+            failed_stage = "image_generation"
+            error_reason = image_error
+        elif review.get("flagged_for_human_review"):
+            status_str = "flagged_for_review"
+            failed_stage = None
+            error_reason = None
+        else:
+            status_str = "draft"
+            failed_stage = None
+            error_reason = None
+
         final_post = {
             "post_id": post_id,
-            "status": (
-                "flagged_for_review"
-                if review.get("flagged_for_human_review")
-                else "draft"
-            ),
+            "status": status_str,
+            "failed_stage": failed_stage,
+            "error_reason": error_reason,
             "trend_source": {
                 "trend_name": post.get("trend_title", ""),
                 "trend_url": post.get("trend_url", ""),
@@ -181,11 +212,13 @@ async def _persist_to_db(
                 fmt_str = post.get("format", "quick_tips")
                 fmt = FORMAT_MAP.get(fmt_str, PostFormat.QUICK_TIPS)
 
-                status = (
-                    ContentStatus.FLAGGED_FOR_REVIEW
-                    if post.get("status") == "flagged_for_review"
-                    else ContentStatus.DRAFT
-                )
+                status_str = post.get("status")
+                if status_str == "failed":
+                    status = ContentStatus.FAILED
+                elif status_str == "flagged_for_review":
+                    status = ContentStatus.FLAGGED_FOR_REVIEW
+                else:
+                    status = ContentStatus.DRAFT
 
                 review = post.get("review", {})
                 metadata = post.get("metadata", {})
@@ -209,6 +242,8 @@ async def _persist_to_db(
                     best_posting_time=metadata.get("best_posting_time"),
                     timing_window=metadata.get("timing_window"),
                     status=status,
+                    failed_stage=post.get("failed_stage"),
+                    error_reason=post.get("error_reason"),
                     review_score=review.get("score"),
                     review_notes=review.get("notes"),
                     review_criteria=review.get("criteria"),
@@ -267,16 +302,16 @@ async def output_packaging_node(state: PostGenState) -> dict:
     except Exception as e:
         logger.warning("output_packaging: strategy update save failed", error=str(e))
 
-    total_posts = len(final_output.get("posts", []))
-    flagged = sum(
-        1 for p in final_output.get("posts", [])
-        if p.get("status") == "flagged_for_review"
-    )
+    out_posts = final_output.get("posts", [])
+    total_posts = len(out_posts)
+    flagged = sum(1 for p in out_posts if p.get("status") == "flagged_for_review")
+    failed = sum(1 for p in out_posts if p.get("status") == "failed")
 
     logger.info(
         "output_packaging: completed",
         total_posts=total_posts,
         flagged_for_review=flagged,
+        failed=failed,
         files_saved=len(saved_paths),
     )
 

@@ -10,12 +10,33 @@ from app.config import get_settings
 logger = structlog.get_logger()
 
 _QUEUE_NAME = "video-processing"
+_SCAN_QUEUE_NAME = "scan-processing"
 
 
 def _redis_settings() -> RedisSettings:
     settings = get_settings()
     # arq RedisSettings accepts a URL string directly
     return RedisSettings.from_dsn(settings.REDIS_URL)
+
+
+async def enqueue_scan_task(scan_run_id: str, request_data: dict) -> str:
+    """Enqueue a trend scan job onto the 'scan-processing' queue.
+
+    ``request_data`` should be the ScanRequest dumped with exclude_unset=True so
+    the worker can reconstruct it with model_fields_set intact. Returns the job ID.
+    """
+    pool = await create_pool(_redis_settings())
+    job = await pool.enqueue_job(
+        "process_scan_task",
+        scan_run_id,
+        request_data,
+        _queue_name=_SCAN_QUEUE_NAME,
+    )
+    await pool.aclose()
+
+    job_id = job.job_id if job else "unknown"
+    logger.info("job_queue: enqueued scan", scan_run_id=scan_run_id, job_id=job_id)
+    return job_id
 
 
 async def enqueue_video_task(
