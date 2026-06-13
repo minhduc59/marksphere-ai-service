@@ -28,6 +28,9 @@ class PipelineRun(Base):
     triggered_by: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True), nullable=True, index=True
     )
+    # How this run was started: "manual" | "scheduled". Propagated onto the
+    # inner ScanRun so the Recent Runs table can label the run's mode.
+    triggered_type: Mapped[str | None] = mapped_column(String(20), nullable=True)
     status: Mapped[ScanStatus] = mapped_column(
         Enum(ScanStatus, name="ScanStatus", schema="ai", values_callable=lambda e: [m.value for m in e]),
         default=ScanStatus.PENDING,

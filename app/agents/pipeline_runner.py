@@ -131,8 +131,10 @@ async def run_pipeline(pipeline_run_id: str, request: PipelineRunRequest) -> Non
 
     start_time = time.time()
 
-    # Resolve owning user from the pipeline run.
+    # Resolve owning user + run mode from the pipeline run, so the inner scan
+    # run inherits whether this pipeline was started manually or by the daemon.
     triggered_by: uuid.UUID | None = None
+    triggered_type: str | None = None
     async with async_session_factory() as db:
         prow = (
             await db.execute(
@@ -141,6 +143,7 @@ async def run_pipeline(pipeline_run_id: str, request: PipelineRunRequest) -> Non
         ).scalar_one_or_none()
         if prow:
             triggered_by = prow.triggered_by
+            triggered_type = prow.triggered_type
 
     # Create the underlying scan run and link it.
     async with async_session_factory() as db:
@@ -148,6 +151,7 @@ async def run_pipeline(pipeline_run_id: str, request: PipelineRunRequest) -> Non
             platforms_requested=[p.value for p in request.platforms],
             status=ScanStatus.PENDING,
             triggered_by=triggered_by,
+            triggered_type=triggered_type,
         )
         db.add(scan_run)
         await db.commit()

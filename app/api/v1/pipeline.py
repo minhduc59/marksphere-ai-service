@@ -8,6 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.v1.deps import get_current_user_id, get_optional_user_id
 from app.api.v1.schemas.pipeline import PipelineConfigResponse, PipelineConfigUpdate
+from app.api.v1.schemas.schedule import ScheduleResponse
 from app.api.v1.schemas.pipeline_run import (
     PipelineRunListResponse,
     PipelineRunRequest,
@@ -193,6 +194,35 @@ async def _patch_config(
     return PipelineConfigResponse.from_orm(row)
 
 
+@router.get(
+    "/schedule",
+    response_model=ScheduleResponse | None,
+    summary="Get the current user's active scan schedule",
+    description=(
+        "Returns the active recurring scan schedule for the current user "
+        "(cron expression, next/last run time), or `null` when none is set. "
+        "Powers the Pipeline Control Center 'Active schedule' card."
+    ),
+)
+async def get_pipeline_schedule(
+    db: AsyncSession = Depends(get_session),
+    user_id: uuid.UUID = Depends(get_current_user_id),
+) -> ScheduleResponse | None:
+    row = (
+        await db.execute(
+            select(ScanSchedule)
+            .where(
+                ScanSchedule.owner_id == user_id,
+                ScanSchedule.is_active.is_(True),
+            )
+            .order_by(ScanSchedule.created_at.desc())
+        )
+    ).scalars().first()
+    if row is None:
+        return None
+    return ScheduleResponse.model_validate(row)
+
+
 # ── Pipeline runs ───────────────────────────────────────────────────────────
 # The end-to-end pipeline (Trending Scanner → Post Generation → Publishing Post)
 # is its own resource. It wraps a scan execution; live progress is derived from
@@ -225,6 +255,7 @@ async def trigger_pipeline_run(
         status=ScanStatus.PENDING,
         stage="scanning",
         triggered_by=user_id,
+        triggered_type="manual",
     )
     db.add(pipeline_run)
     await db.commit()

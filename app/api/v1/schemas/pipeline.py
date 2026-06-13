@@ -21,6 +21,8 @@ class PipelineConfigResponse(BaseModel):
     default_privacy_level: str
     scan_schedule_enabled: bool
     scan_cron_expression: Optional[str]
+    hn_rate_limit_per_min: int
+    hn_retry_strategy: str
     created_at: str
     updated_at: Optional[str]
 
@@ -45,6 +47,8 @@ class PipelineConfigResponse(BaseModel):
             default_privacy_level=obj.default_privacy_level,  # type: ignore[attr-defined]
             scan_schedule_enabled=obj.scan_schedule_enabled,  # type: ignore[attr-defined]
             scan_cron_expression=obj.scan_cron_expression,  # type: ignore[attr-defined]
+            hn_rate_limit_per_min=obj.hn_rate_limit_per_min,  # type: ignore[attr-defined]
+            hn_retry_strategy=obj.hn_retry_strategy,  # type: ignore[attr-defined]
             created_at=obj.created_at.isoformat() if obj.created_at else "",  # type: ignore[attr-defined]
             updated_at=obj.updated_at.isoformat() if obj.updated_at else None,  # type: ignore[attr-defined]
         )
@@ -65,3 +69,5 @@ class PipelineConfigUpdate(BaseModel):
     default_privacy_level: Optional[str] = None
     scan_schedule_enabled: Optional[bool] = None
     scan_cron_expression: Optional[str] = None
+    hn_rate_limit_per_min: Optional[int] = Field(default=None, ge=1, le=1000)
+    hn_retry_strategy: Optional[str] = None

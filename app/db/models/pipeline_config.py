@@ -58,6 +58,12 @@ class PipelineConfig(Base):
         String(100), nullable=True
     )
 
+    # HackerNews API config
+    hn_rate_limit_per_min: Mapped[int] = mapped_column(Integer, default=60)
+    hn_retry_strategy: Mapped[str] = mapped_column(
+        String(20), default="exponential"
+    )
+
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
     )

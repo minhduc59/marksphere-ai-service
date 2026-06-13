@@ -71,6 +71,7 @@ async def trigger_scan(
         platforms_requested=[p.value for p in request.platforms],
         status=ScanStatus.PENDING,
         triggered_by=user_id,
+        triggered_type="manual",
     )
     db.add(scan_run)
     await db.commit()

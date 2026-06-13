@@ -92,6 +92,7 @@ async def run_scheduled_pipeline(schedule_id: str) -> None:
             status=ScanStatus.PENDING,
             stage="scanning",
             triggered_by=owner_id,
+            triggered_type="scheduled",
         )
         db.add(pipeline_run)
         await db.commit()
