@@ -168,9 +168,13 @@ async def list_posts(
     count_query = select(func.count()).select_from(query.subquery())
     total = (await db.execute(count_query)).scalar() or 0
 
-    # Paginate
+    # Paginate — most recently updated first so a post that just changed status
+    # surfaces on top. updated_at is NULL until the first update, so fall back to
+    # created_at for never-touched posts.
     query = (
-        query.order_by(ContentPost.created_at.desc())
+        query.order_by(
+            func.coalesce(ContentPost.updated_at, ContentPost.created_at).desc()
+        )
         .offset((page - 1) * page_size)
         .limit(page_size)
     )
@@ -295,3 +299,35 @@ async def update_post_status(
     await db.refresh(post)
 
     return PostDetail.model_validate(post)
+
+
+@router.delete(
+    "/{post_id}",
+    status_code=204,
+    summary="Delete a post",
+    description=(
+        "Hard-deletes a content post (and its published_posts rows via FK "
+        "cascade). Published posts cannot be deleted."
+    ),
+)
+async def delete_post(
+    post_id: uuid.UUID,
+    db: AsyncSession = Depends(get_session),
+    user_id: uuid.UUID = Depends(get_current_user_id),
+) -> None:
+    result = await db.execute(
+        select(ContentPost).where(
+            ContentPost.id == post_id,
+            (ContentPost.created_by == user_id) | (ContentPost.created_by.is_(None)),
+        )
+    )
+    post = result.scalar_one_or_none()
+
+    if not post:
+        raise HTTPException(status_code=404, detail="Post not found")
+    if post.status == ContentStatus.PUBLISHED:
+        raise HTTPException(status_code=409, detail="Cannot delete a published post")
+
+    # ORM cascade + FK ON DELETE CASCADE also removes related published_posts.
+    await db.delete(post)
+    await db.commit()

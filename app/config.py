@@ -10,7 +10,7 @@ class Settings(BaseSettings):
 
     # Database — either pass DATABASE_URL directly, or pass discrete DB_* vars
     # (as ECS does) and let the validator below assemble the URL.
-    DATABASE_URL: str = "postgresql+asyncpg://scanner:scanner_pass@localhost:5432/trending_scanner"
+    DATABASE_URL: str = "postgresql+asyncpg://scanner:scanner_pass@localhost:5432/marksphere"
     DB_HOST: str | None = None
     DB_PORT: str | None = None
     DB_USER: str | None = None
