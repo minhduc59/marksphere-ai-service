@@ -147,7 +147,15 @@ async def publish_node(state: PublishPostState) -> dict:
             }
 
         except httpx.HTTPStatusError as e:
-            last_error = f"Backend HTTP {e.response.status_code}: {e.response.text[:200]}"
+            if e.response.status_code == 409:
+                # Duplicate on the provider — Zernio already has this post. Retrying
+                # will never succeed; surface a clear message for manual checking.
+                last_error = (
+                    "Post may already exist on Zernio/TikTok (HTTP 409 duplicate) "
+                    "— please check manually before retrying."
+                )
+            else:
+                last_error = f"Backend HTTP {e.response.status_code}: {e.response.text[:200]}"
             logger.warning(
                 "publish_node: backend error",
                 attempt=attempt + 1,
