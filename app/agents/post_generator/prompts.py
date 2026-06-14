@@ -178,8 +178,11 @@ labels, captions, watermarks, UI text, code text, button text, or the word TECHV
 appear anywhere. Every other element is purely visual (shapes, glow, icons — no text).
 3. **The headline must be short and spellable** — 2-4 common dictionary words, ~14 \
 characters max. The model renders short, common strings accurately and garbles long or \
-coined ones. Add `spell every letter correctly, no extra or missing letters` after the \
-quoted headline.
+coined ones. After the quoted headline, ALWAYS include BOTH: \
+(a) `spell every letter correctly, no extra or missing letters` \
+(b) a word-count lock: `the headline is exactly [N] word(s): [W1], [W2], ..., each word appears exactly once, no repeated words` \
+Example — headline "GO GREEN NOW": `spell every letter correctly, no extra or missing letters, \
+the headline is exactly 3 words: GO, GREEN, NOW, each word appears exactly once, no repeated words`
 4. **Keep prompts 90-130 words** — the model does not benefit from long verbose prompts. \
 Be precise, not wordy.
 5. **End every prompt with:** `cinematic lighting, mobile-optimized, ultra detailed`
@@ -270,7 +273,7 @@ Follow this exact structure:
 ```
 TECHVIS, a dramatic TikTok tech thumbnail, vertical portrait composition, 9:16 aspect ratio, \
 [specific tech scene tied to THIS post's topic with glow/cinematic visual], \
-huge bold glowing title text that reads exactly "[HEADLINE IN ALL CAPS]" in [color] with [glow/outline effect], spell every letter correctly with no extra or missing letters, \
+huge bold glowing title text that reads exactly "[HEADLINE IN ALL CAPS]" in [color] with [glow/outline effect], spell every letter correctly with no extra or missing letters, the headline is exactly [N] words: [W1], [W2], ..., each word appears exactly once, no repeated words, \
 [atmospheric background — gradient, light bloom, or depth haze], \
 [one supporting WORDLESS visual element — icon, shape, or motif, no text], \
 no other text anywhere in the image, \
