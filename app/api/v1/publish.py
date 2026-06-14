@@ -27,11 +27,30 @@ from app.api.v1.schemas.publish import (
 )
 from app.db.models.content_post import ContentPost
 from app.db.models.enums import ContentStatus, PublishMode, PublishStatus
+from app.db.models.pipeline_config import PipelineConfig
 from app.db.models.published_post import PublishedPost
 from app.db.session import async_session_factory
 
 logger = structlog.get_logger()
 router = APIRouter()
+
+
+async def _resolve_privacy_level(user_id: uuid.UUID, requested: str | None) -> str:
+    """Return the effective privacy level.
+
+    Priority: request body value → user's PipelineConfig.default_privacy_level
+    → settings.TIKTOK_DEFAULT_PRIVACY.
+    """
+    if requested:
+        return requested
+    async with async_session_factory() as db:
+        result = await db.execute(
+            select(PipelineConfig).where(PipelineConfig.owner_id == user_id)
+        )
+        config = result.scalar_one_or_none()
+    if config and config.default_privacy_level:
+        return config.default_privacy_level
+    return get_settings().TIKTOK_DEFAULT_PRIVACY
 
 
 @router.post(
@@ -49,11 +68,13 @@ async def publish_now(
 ):
     await _validate_post_for_publish(post_id, user_id)
 
+    privacy_level = await _resolve_privacy_level(user_id, body.privacy_level)
+
     published_post_id = await _create_published_post_row(
         content_post_id=post_id,
         user_id=user_id,
         mode=PublishMode.MANUAL,
-        privacy_level=body.privacy_level,
+        privacy_level=privacy_level,
     )
 
     background_tasks.add_task(
@@ -61,7 +82,7 @@ async def publish_now(
         content_post_id=post_id,
         mode="manual",
         scheduled_time=None,
-        privacy_level=body.privacy_level,
+        privacy_level=privacy_level,
         user_id=str(user_id),
         published_post_id=published_post_id,
     )
@@ -97,11 +118,13 @@ async def schedule_publish(
     if scheduled_at <= now:
         raise HTTPException(status_code=400, detail="scheduled_at must be in the future")
 
+    privacy_level = await _resolve_privacy_level(user_id, body.privacy_level)
+
     published_post_id = await _create_published_post_row(
         content_post_id=post_id,
         user_id=user_id,
         mode=PublishMode.MANUAL,
-        privacy_level=body.privacy_level,
+        privacy_level=privacy_level,
     )
 
     background_tasks.add_task(
@@ -109,7 +132,7 @@ async def schedule_publish(
         content_post_id=post_id,
         mode="manual",
         scheduled_time=scheduled_at,
-        privacy_level=body.privacy_level,
+        privacy_level=privacy_level,
         user_id=str(user_id),
         published_post_id=published_post_id,
     )
@@ -138,18 +161,20 @@ async def auto_publish(
 ):
     await _validate_post_for_publish(post_id, user_id)
 
+    privacy_level = await _resolve_privacy_level(user_id, body.privacy_level)
+
     published_post_id = await _create_published_post_row(
         content_post_id=post_id,
         user_id=user_id,
         mode=PublishMode.AUTO,
-        privacy_level=body.privacy_level,
+        privacy_level=privacy_level,
     )
 
     background_tasks.add_task(
         run_publish_pipeline,
         content_post_id=post_id,
         mode="auto",
-        privacy_level=body.privacy_level,
+        privacy_level=privacy_level,
         user_id=str(user_id),
         published_post_id=published_post_id,
     )
