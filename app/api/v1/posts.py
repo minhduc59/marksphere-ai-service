@@ -21,6 +21,7 @@ from app.api.v1.schemas.post import (
 )
 from app.db.models import ContentPost, ContentStatus, PostFormat, ScanRun, ScanStatus
 from app.dependencies import get_session
+from app.agents.pipeline_runner import create_article_pipeline_run
 from app.services.article_pipeline import (
     create_scan_for_article,
     run_article_pipeline,
@@ -92,8 +93,9 @@ async def generate_posts(
         "Express pipeline: crawls the article, builds a Stage-3-equivalent "
         "report, then invokes the existing post-generation graph. "
         "Skips trend scanning entirely.\n\n"
-        "Returns 202 immediately with a scan_run_id the client can subscribe "
-        "to via the WebSocket gateway (`scan:<id>` room) to follow progress."
+        "Returns 202 immediately with a pipeline_id the client can subscribe "
+        "to via the WebSocket gateway (`pipeline:<id>` room) to follow the "
+        "unified scan → generate → publish progress."
     ),
 )
 async def create_post_from_article(
@@ -103,6 +105,8 @@ async def create_post_from_article(
 ):
     url_str = str(request.url)
     scan_run_id = await create_scan_for_article(url_str, user_id)
+    # Wrap in a parent PipelineRun so the run is polled via /pipeline/runs/{id}/status.
+    pipeline_run_id = await create_article_pipeline_run(user_id, scan_run_id, url_str)
 
     options = {
         "num_posts": request.options.num_posts,
@@ -112,11 +116,22 @@ async def create_post_from_article(
             else None
         ),
     }
+    # Only forward explicitly-set overrides; unset fields fall back to PipelineConfig.
+    publish_overrides = request.publish_settings.model_dump(
+        mode="json", exclude_none=True
+    )
     background_tasks.add_task(
-        run_article_pipeline, scan_run_id, url_str, options, user_id
+        run_article_pipeline,
+        pipeline_run_id,
+        scan_run_id,
+        url_str,
+        options,
+        user_id,
+        publish_overrides,
     )
 
     return FromArticleResponse(
+        pipeline_id=pipeline_run_id,
         scan_run_id=scan_run_id,
         status="accepted",
         message=f"Article pipeline started for {url_str}",
@@ -153,9 +168,13 @@ async def list_posts(
     count_query = select(func.count()).select_from(query.subquery())
     total = (await db.execute(count_query)).scalar() or 0
 
-    # Paginate
+    # Paginate — most recently updated first so a post that just changed status
+    # surfaces on top. updated_at is NULL until the first update, so fall back to
+    # created_at for never-touched posts.
     query = (
-        query.order_by(ContentPost.created_at.desc())
+        query.order_by(
+            func.coalesce(ContentPost.updated_at, ContentPost.created_at).desc()
+        )
         .offset((page - 1) * page_size)
         .limit(page_size)
     )
@@ -228,12 +247,19 @@ async def regenerate_post(
     post = result.scalar_one_or_none()
     if not post:
         raise HTTPException(status_code=404, detail="Post not found")
-    if post.status != ContentStatus.NEEDS_REVISION:
+    # NEEDS_REVISION: user rejected on quality (feedback required).
+    # FAILED: post errored mid-pipeline (retry; feedback optional).
+    if post.status not in (ContentStatus.NEEDS_REVISION, ContentStatus.FAILED):
         raise HTTPException(
             status_code=409,
             detail=(
-                f"Post is not in needs_revision state (current: {post.status.value})"
+                "Post is not retryable (current: "
+                f"{post.status.value}); expected needs_revision or failed"
             ),
+        )
+    if post.status == ContentStatus.NEEDS_REVISION and not request.feedback.strip():
+        raise HTTPException(
+            status_code=422, detail="feedback is required to revise a post"
         )
 
     from app.agents.post_generator.revision_runner import run_human_feedback_revision
@@ -273,3 +299,35 @@ async def update_post_status(
     await db.refresh(post)
 
     return PostDetail.model_validate(post)
+
+
+@router.delete(
+    "/{post_id}",
+    status_code=204,
+    summary="Delete a post",
+    description=(
+        "Hard-deletes a content post (and its published_posts rows via FK "
+        "cascade). Published posts cannot be deleted."
+    ),
+)
+async def delete_post(
+    post_id: uuid.UUID,
+    db: AsyncSession = Depends(get_session),
+    user_id: uuid.UUID = Depends(get_current_user_id),
+) -> None:
+    result = await db.execute(
+        select(ContentPost).where(
+            ContentPost.id == post_id,
+            (ContentPost.created_by == user_id) | (ContentPost.created_by.is_(None)),
+        )
+    )
+    post = result.scalar_one_or_none()
+
+    if not post:
+        raise HTTPException(status_code=404, detail="Post not found")
+    if post.status == ContentStatus.PUBLISHED:
+        raise HTTPException(status_code=409, detail="Cannot delete a published post")
+
+    # ORM cascade + FK ON DELETE CASCADE also removes related published_posts.
+    await db.delete(post)
+    await db.commit()

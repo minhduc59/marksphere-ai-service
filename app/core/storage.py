@@ -1,10 +1,11 @@
-"""Storage abstraction for report, article, and media files.
+"""Storage abstraction for report, article, media, and post files.
 
-- Development: writes to local filesystem under ai-service/
-  Public URLs served via FastAPI StaticFiles mount (+ ngrok for TikTok API).
-- Production: uploads to S3 bucket, public URLs via presigned URLs or CloudFront.
-- Cloudinary: used for generated images and video clips. Call get_cloudinary_storage()
-  to get a CloudinaryStorage instance; do not import the cloudinary SDK anywhere else.
+All storage — text reports, JSON posts, strategy files, images, and video clips —
+goes through Cloudinary.  Text/JSON files use resource_type="raw"; images use
+resource_type="image"; videos use resource_type="video".
+
+Always access storage via get_storage() or get_cloudinary_storage(); do not
+import cloudinary directly outside this module.
 """
 
 from __future__ import annotations
@@ -21,15 +22,13 @@ from app.config import Settings, get_settings
 
 logger = structlog.get_logger()
 
-BASE_DIR = Path(__file__).resolve().parent.parent.parent  # ai-service/
-
 
 @dataclass
 class StorageObject:
     """Result returned by upload_file — the permanent URL and the provider key."""
 
     url: str        # Public https URL
-    public_id: str  # Provider-specific identifier (Cloudinary public_id, S3 key, local path)
+    public_id: str  # Provider-specific identifier (Cloudinary public_id)
 
 
 class StorageBackend(abc.ABC):
@@ -56,7 +55,6 @@ class StorageBackend(abc.ABC):
         """Get a publicly accessible URL for the given storage key.
 
         Used by TikTok's PULL_FROM_URL to download media files.
-        Dev: ngrok-tunneled static file URL. Prod: S3 presigned URL.
         """
 
     @abc.abstractmethod
@@ -87,113 +85,6 @@ class StorageBackend(abc.ABC):
         raise NotImplementedError(
             f"{self.__class__.__name__} does not support download_file"
         )
-
-
-class LocalStorage(StorageBackend):
-    """Local filesystem storage under ai-service/."""
-
-    def __init__(self, base_dir: Path = BASE_DIR) -> None:
-        self.base_dir = base_dir
-
-    def write_text(self, key: str, content: str, content_type: str = "text/plain") -> str:
-        path = self.base_dir / key
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(content, encoding="utf-8")
-        logger.debug("LocalStorage: written", path=str(path))
-        return key
-
-    def write_bytes(self, key: str, data: bytes, content_type: str = "application/octet-stream") -> str:
-        path = self.base_dir / key
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_bytes(data)
-        logger.debug("LocalStorage: written bytes", path=str(path), size=len(data))
-        return key
-
-    def read_text(self, key: str) -> str:
-        path = self.base_dir / key
-        return path.read_text(encoding="utf-8")
-
-    def exists(self, key: str) -> bool:
-        return (self.base_dir / key).exists()
-
-    def get_public_url(self, key: str) -> str:
-        settings = get_settings()
-        return f"{settings.STORAGE_PUBLIC_BASE_URL}/{key}"
-
-    def delete(self, key: str) -> bool:
-        path = self.base_dir / key
-        if path.exists():
-            path.unlink()
-            logger.debug("LocalStorage: deleted", path=str(path))
-            return True
-        return False
-
-
-class S3Storage(StorageBackend):
-    """AWS S3 storage backend."""
-
-    def __init__(self, bucket: str, region: str, prefix: str) -> None:
-        import boto3
-
-        self.bucket = bucket
-        self.prefix = prefix
-        self.client = boto3.client("s3", region_name=region)
-
-    def _full_key(self, key: str) -> str:
-        return f"{self.prefix}/{key}" if self.prefix else key
-
-    def write_text(self, key: str, content: str, content_type: str = "text/plain") -> str:
-        full_key = self._full_key(key)
-        self.client.put_object(
-            Bucket=self.bucket,
-            Key=full_key,
-            Body=content.encode("utf-8"),
-            ContentType=content_type,
-        )
-        s3_path = f"s3://{self.bucket}/{full_key}"
-        logger.debug("S3Storage: uploaded", s3_path=s3_path)
-        return s3_path
-
-    def write_bytes(self, key: str, data: bytes, content_type: str = "application/octet-stream") -> str:
-        full_key = self._full_key(key)
-        self.client.put_object(
-            Bucket=self.bucket,
-            Key=full_key,
-            Body=data,
-            ContentType=content_type,
-        )
-        s3_path = f"s3://{self.bucket}/{full_key}"
-        logger.debug("S3Storage: uploaded bytes", s3_path=s3_path, size=len(data))
-        return s3_path
-
-    def read_text(self, key: str) -> str:
-        full_key = self._full_key(key)
-        response = self.client.get_object(Bucket=self.bucket, Key=full_key)
-        return response["Body"].read().decode("utf-8")
-
-    def exists(self, key: str) -> bool:
-        import botocore.exceptions
-
-        full_key = self._full_key(key)
-        try:
-            self.client.head_object(Bucket=self.bucket, Key=full_key)
-            return True
-        except botocore.exceptions.ClientError:
-            return False
-
-    def get_public_url(self, key: str) -> str:
-        full_key = self._full_key(key)
-        return self.client.generate_presigned_url(
-            "get_object",
-            Params={"Bucket": self.bucket, "Key": full_key},
-            ExpiresIn=3600,
-        )
-
-    def delete(self, key: str) -> bool:
-        full_key = self._full_key(key)
-        self.client.delete_object(Bucket=self.bucket, Key=full_key)
-        logger.debug("S3Storage: deleted", key=full_key)
-        return True
 
 
 _CLOUDINARY_CONFIG_LOCK = threading.Lock()
@@ -232,14 +123,15 @@ def _ensure_cloudinary_configured(settings: Settings) -> None:
 
 
 class CloudinaryStorage(StorageBackend):
-    """Cloudinary storage backend for media files (images, videos, fonts).
+    """Cloudinary storage backend for all file types.
+
+    - Text/JSON files (reports, posts, strategy): resource_type="raw"
+    - Images: resource_type="image"
+    - Videos: resource_type="video"
 
     This is the ONLY place in the codebase that may import cloudinary directly.
     All new code that needs Cloudinary must go through this class via
-    get_cloudinary_storage().  The legacy cloudinary_uploader module is kept
-    for the existing photo pipeline; do not add new usages there.
-
-    Paths are namespaced by the caller: {user_id}/video-tasks/{task_id}/...
+    get_cloudinary_storage() or get_storage().
     """
 
     def __init__(self, settings: Settings) -> None:
@@ -250,15 +142,35 @@ class CloudinaryStorage(StorageBackend):
     # ------------------------------------------------------------------
 
     def write_text(self, key: str, content: str, content_type: str = "text/plain") -> str:
-        raise NotImplementedError("CloudinaryStorage does not support text files")
+        import io
+
+        import cloudinary.uploader
+
+        result = cloudinary.uploader.upload(
+            io.BytesIO(content.encode("utf-8")),
+            public_id=key,
+            resource_type="raw",
+            overwrite=True,
+            invalidate=True,
+        )
+        url: str = result["secure_url"]
+        logger.debug("CloudinaryStorage.write_text", public_id=key, size=len(content))
+        return url
 
     def write_bytes(
         self, key: str, data: bytes, content_type: str = "application/octet-stream"
     ) -> str:
-        import cloudinary.uploader
         import io
 
-        resource_type = "video" if content_type.startswith("video/") else "image"
+        import cloudinary.uploader
+
+        if content_type.startswith("video/"):
+            resource_type = "video"
+        elif content_type.startswith("image/"):
+            resource_type = "image"
+        else:
+            resource_type = "raw"
+
         result = cloudinary.uploader.upload(
             io.BytesIO(data),
             public_id=key,
@@ -271,16 +183,24 @@ class CloudinaryStorage(StorageBackend):
         return url
 
     def read_text(self, key: str) -> str:
-        raise NotImplementedError("CloudinaryStorage does not support text reads")
+        import cloudinary.utils
+        import httpx
+
+        url, _ = cloudinary.utils.cloudinary_url(key, resource_type="raw")
+        response = httpx.get(url, follow_redirects=True)
+        response.raise_for_status()
+        return response.text
 
     def exists(self, key: str) -> bool:
         import cloudinary.api
 
-        try:
-            cloudinary.api.resource(key)
-            return True
-        except Exception:
-            return False
+        for resource_type in ("raw", "image", "video"):
+            try:
+                cloudinary.api.resource(key, resource_type=resource_type)
+                return True
+            except Exception:
+                pass
+        return False
 
     def get_public_url(self, key: str) -> str:
         import cloudinary
@@ -290,8 +210,7 @@ class CloudinaryStorage(StorageBackend):
     def delete(self, key: str) -> bool:
         import cloudinary.uploader
 
-        # Try both resource types; Cloudinary returns ok/not found regardless
-        for rtype in ("image", "video", "raw"):
+        for rtype in ("raw", "image", "video"):
             result = cloudinary.uploader.destroy(key, resource_type=rtype)
             if result.get("result") == "ok":
                 logger.debug("CloudinaryStorage.delete", public_id=key, resource_type=rtype)
@@ -339,6 +258,7 @@ class CloudinaryStorage(StorageBackend):
     def download_file(self, source_key: str, local_path: str) -> None:
         """Download a Cloudinary asset to a local path (used for source video + fonts)."""
         import urllib.request
+
         import cloudinary
 
         url = cloudinary.CloudinaryImage(source_key).build_url(secure=True)
@@ -362,21 +282,5 @@ def get_cloudinary_storage(settings: Settings | None = None) -> CloudinaryStorag
 
 
 def get_storage(settings: Settings | None = None) -> StorageBackend:
-    """Return the appropriate storage backend based on APP_ENV."""
-    if settings is None:
-        settings = get_settings()
-
-    if settings.is_production and settings.S3_BUCKET:
-        logger.info(
-            "Using S3 storage",
-            bucket=settings.S3_BUCKET,
-            prefix=settings.S3_PREFIX,
-        )
-        return S3Storage(
-            bucket=settings.S3_BUCKET,
-            region=settings.S3_REGION,
-            prefix=settings.S3_PREFIX,
-        )
-
-    logger.info("Using local filesystem storage", base_dir=str(BASE_DIR))
-    return LocalStorage(BASE_DIR)
+    """Return the storage backend. All environments use Cloudinary."""
+    return get_cloudinary_storage(settings)

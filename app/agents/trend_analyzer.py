@@ -4,6 +4,7 @@ Single-pass LLM call that scores, filters, analyzes, and generates
 a TikTok-focused trend report from raw crawled articles.
 """
 
+import asyncio
 import json
 from datetime import datetime, timezone
 
@@ -13,11 +14,18 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from app.agents.state import TrendScanState
 from app.clients.openai_client import get_analyzer_llm
 from app.core.dedup import compute_dedup_key
+from app.core.llm_errors import classify_llm_error
 from app.core.storage import get_storage
 
 logger = structlog.get_logger()
 
 DEFAULT_QUALITY_THRESHOLD = 5
+# Articles per LLM analysis call.
+CHUNK_SIZE = 40
+# How many chunks to analyze concurrently. Chunks are independent, so we run a
+# bounded number in parallel to cut latency on large scans without flooding the
+# OpenAI rate limit.
+ANALYZER_CHUNK_CONCURRENCY = 3
 DEFAULT_KEYWORDS = [
     "Artificial Intelligence & Machine Learning",
     "Software Engineering & Developer Tools",
@@ -392,66 +400,112 @@ async def trend_analyzer_node(state: TrendScanState) -> dict:
     all_discarded = []
     all_report_sections = []
     final_meta = {}
+    analysis_errors: list[dict] = []
 
-    for chunk_idx, chunk in enumerate(_chunks(all_items, 40)):
+    system_prompt = TREND_ANALYZER_SYSTEM_PROMPT.format(
+        quality_threshold=quality_threshold,
+        date=today,
+        keywords=json.dumps(keywords),
+    )
+    chunk_sem = asyncio.Semaphore(ANALYZER_CHUNK_CONCURRENCY)
+
+    async def _process_chunk(chunk_idx: int, chunk: list) -> dict:
+        """Analyze one chunk. Returns a result dict; never raises.
+
+        Article IDs are offset by ``chunk_idx * CHUNK_SIZE`` so they stay unique
+        and aligned to ``all_items`` indices across concurrent chunks.
+        """
+        offset = chunk_idx * CHUNK_SIZE
         raw_articles = _prepare_raw_articles(chunk)
-
-        system_prompt = TREND_ANALYZER_SYSTEM_PROMPT.format(
-            quality_threshold=quality_threshold,
-            date=today,
-            keywords=json.dumps(keywords),
-        )
-
         user_message = json.dumps(raw_articles, default=str)
 
-        try:
-            response = await llm.ainvoke([
-                SystemMessage(content=system_prompt),
-                HumanMessage(content=user_message),
-            ])
+        async with chunk_sem:
+            try:
+                response = await llm.ainvoke([
+                    SystemMessage(content=system_prompt),
+                    HumanMessage(content=user_message),
+                ])
+                result = _parse_llm_response(response.content)
+                chunk_processed = result.get("processed_articles", [])
+                chunk_discarded = result.get("discarded_articles", [])
+                for article in chunk_processed:
+                    article["id"] = str(int(article.get("id", "0")) + offset)
+                for article in chunk_discarded:
+                    article["id"] = str(int(article.get("id", "0")) + offset)
 
-            result = _parse_llm_response(response.content)
+                logger.info(
+                    "TrendAnalyzer: chunk processed",
+                    chunk=chunk_idx + 1,
+                    passed=len(chunk_processed),
+                    discarded=len(chunk_discarded),
+                )
+                return {
+                    "processed": chunk_processed,
+                    "discarded": chunk_discarded,
+                    "report": result.get("trend_report_md", ""),
+                    "meta": result.get("meta", {}),
+                    "error": None,
+                }
+            except Exception as e:
+                _, is_fatal = classify_llm_error(str(e))
+                logger.error(
+                    "TrendAnalyzer: LLM call failed for chunk",
+                    chunk=chunk_idx,
+                    error=str(e),
+                    fatal=is_fatal,
+                )
+                if is_fatal:
+                    # Config/billing failure (bad key, exhausted quota) — don't
+                    # fabricate a fallback report that looks successful. Record
+                    # the error; persist_results surfaces it on the scan.
+                    return {
+                        "processed": [],
+                        "discarded": [],
+                        "report": "",
+                        "meta": {},
+                        "error": {"node": "trend_analyzer", "error": str(e), "fatal": True},
+                    }
+                # Transient/parse failure — degrade gracefully with a fallback.
+                fallback = _generate_fallback_report(chunk)
+                for article in fallback["processed_articles"]:
+                    article["id"] = str(int(article.get("id", "0")) + offset)
+                return {
+                    "processed": fallback["processed_articles"],
+                    "discarded": [],
+                    "report": fallback["trend_report_md"],
+                    "meta": {},
+                    "error": None,
+                }
 
-            chunk_processed = result.get("processed_articles", [])
-            chunk_discarded = result.get("discarded_articles", [])
-            chunk_report = result.get("trend_report_md", "")
-            chunk_meta = result.get("meta", {})
+    chunks = list(_chunks(all_items, CHUNK_SIZE))
+    chunk_results = await asyncio.gather(
+        *(_process_chunk(idx, chunk) for idx, chunk in enumerate(chunks))
+    )
 
-            # Offset article IDs for chunks beyond the first
-            offset = chunk_idx * 40
-            for article in chunk_processed:
-                article["id"] = str(int(article.get("id", "0")) + offset)
-            for article in chunk_discarded:
-                article["id"] = str(int(article.get("id", "0")) + offset)
+    # Merge in chunk order so the report and meta stay deterministic.
+    for res in chunk_results:
+        all_processed.extend(res["processed"])
+        all_discarded.extend(res["discarded"])
+        if res["report"]:
+            all_report_sections.append(res["report"])
+        if not final_meta and res["meta"]:
+            final_meta = res["meta"]
+        if res["error"]:
+            analysis_errors.append(res["error"])
 
-            all_processed.extend(chunk_processed)
-            all_discarded.extend(chunk_discarded)
-            if chunk_report:
-                all_report_sections.append(chunk_report)
-            if not final_meta:
-                final_meta = chunk_meta
-
-            logger.info(
-                "TrendAnalyzer: chunk processed",
-                chunk=chunk_idx + 1,
-                passed=len(chunk_processed),
-                discarded=len(chunk_discarded),
-            )
-
-        except Exception as e:
-            logger.error(
-                "TrendAnalyzer: LLM call failed for chunk",
-                chunk=chunk_idx,
-                error=str(e),
-            )
-            # Fallback for this chunk
-            fallback = _generate_fallback_report(chunk)
-            offset = chunk_idx * 40
-            for article in fallback["processed_articles"]:
-                article["id"] = str(int(article.get("id", "0")) + offset)
-            all_processed.extend(fallback["processed_articles"])
-            if not all_report_sections:
-                all_report_sections.append(fallback["trend_report_md"])
+    # Fatal analysis failure with nothing usable — surface it; never save a fake
+    # report. The scan stays PARTIAL (crawl succeeded) so it remains retryable.
+    if analysis_errors and not all_processed:
+        detail = classify_llm_error(analysis_errors[0]["error"])[0]
+        logger.error("TrendAnalyzer: aborted", error=detail)
+        return {
+            "analyzed_trends": [],
+            "discarded_articles": all_discarded,
+            "trend_report_md": "",
+            "analysis_meta": {},
+            "report_file_path": "",
+            "errors": analysis_errors,
+        }
 
     # Use the first chunk's report as the main report (it has the full structure)
     # For multi-chunk scenarios, the first chunk report covers the top articles
@@ -582,4 +636,5 @@ async def trend_analyzer_node(state: TrendScanState) -> dict:
         "trend_report_md": trend_report_md,
         "analysis_meta": final_meta,
         "report_file_path": report_file_path,
+        "errors": analysis_errors,
     }

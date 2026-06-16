@@ -5,6 +5,7 @@ import json
 import structlog
 from langchain_core.messages import HumanMessage, SystemMessage
 
+from app.agents.post_generator.batching import run_batches
 from app.agents.post_generator.prompts import (
     CONTENT_GENERATION_SYSTEM_PROMPT,
     REVISION_SYSTEM_PROMPT,
@@ -13,6 +14,38 @@ from app.agents.post_generator.state import PostGenState
 from app.clients.openai_client import get_content_gen_llm
 
 logger = structlog.get_logger()
+
+
+def _make_failed_placeholder(
+    plan_item: dict,
+    analyzed_trends: list[dict],
+    error: Exception,
+    batch_idx: int,
+    pos: int,
+) -> dict:
+    """Build a minimal post for a plan item whose generation batch failed.
+
+    Carries an ``_error`` marker so output_packaging persists it as a FAILED
+    post (visible to the user, retryable) instead of silently dropping it.
+    """
+    trend_idx = plan_item.get("trend_index", 0)
+    trend = (
+        analyzed_trends[trend_idx]
+        if trend_idx < len(analyzed_trends)
+        else analyzed_trends[0] if analyzed_trends else {}
+    )
+    return {
+        "post_id": f"failed-{batch_idx}-{pos}",
+        "format": plan_item.get("format", ""),
+        "trend_title": trend.get("title", ""),
+        "trend_url": trend.get("source_url", ""),
+        "caption": "",
+        "hashtags": [],
+        "cta": "",
+        "target_audience": plan_item.get("target_audience") or trend.get("target_audience", []),
+        "is_promoted": trend.get("is_promoted", False),
+        "_error": {"stage": "content_generation", "reason": str(error)},
+    }
 
 
 def _parse_json_response(content: str) -> list | dict:
@@ -155,80 +188,99 @@ async def content_generation_node(state: PostGenState) -> dict:
 
     llm = get_content_gen_llm()
 
-    try:
-        if is_revision:
-            # Revision mode: only regenerate failing posts. ``human_feedback``
-            # (if present) overrides the auto-review feedback per the system
-            # prompt rules.
-            review_results = state.get("review_results", [])
-            human_feedback = state.get("human_feedback")
-            user_content = _build_revision_input(
-                posts_to_revise,
-                existing_posts,
-                review_results,
-                analyzed_trends,
-                human_feedback=human_feedback,
-            )
-            messages = [
-                SystemMessage(content=REVISION_SYSTEM_PROMPT),
-                HumanMessage(content=user_content),
-            ]
-        else:
-            # First run: generate all posts
-            brand_voice = _build_brand_voice_instructions(strategy)
-            system_prompt = CONTENT_GENERATION_SYSTEM_PROMPT.format(
-                brand_voice_instructions=brand_voice
-            )
-            user_content = _build_generation_input(content_plan, analyzed_trends, strategy)
-            messages = [
+    if is_revision:
+        # Revision mode: only regenerate failing posts, in bounded batches.
+        # ``human_feedback`` (if present) overrides the auto-review feedback.
+        review_results = state.get("review_results", [])
+        human_feedback = state.get("human_feedback")
+        revise_posts = [p for p in existing_posts if p["post_id"] in posts_to_revise]
+
+        async def _revise_batch(batch: list, idx: int) -> dict:
+            try:
+                user_content = _build_revision_input(
+                    [p["post_id"] for p in batch],
+                    batch,
+                    review_results,
+                    analyzed_trends,
+                    human_feedback=human_feedback,
+                )
+                response = await llm.ainvoke([
+                    SystemMessage(content=REVISION_SYSTEM_PROMPT),
+                    HumanMessage(content=user_content),
+                ])
+                revised = _parse_json_response(response.content)
+                if not isinstance(revised, list):
+                    revised = [revised]
+                return {"posts": revised, "error": None}
+            except Exception as e:
+                logger.error("content_generation: revision batch failed", batch=idx, error=str(e))
+                # Keep the originals untouched; record the error.
+                return {"posts": [], "error": {"node": "content_generation", "error": str(e)}}
+
+        batch_results = await run_batches(revise_posts, _revise_batch)
+        new_posts: list[dict] = []
+        errors: list[dict] = []
+        for r in batch_results:
+            new_posts.extend(r["posts"])
+            if r["error"]:
+                errors.append(r["error"])
+
+        # Merge revised posts back: replace old versions, keep the rest
+        revised_ids = {p["post_id"] for p in new_posts}
+        merged = [p for p in existing_posts if p["post_id"] not in revised_ids]
+        merged.extend(new_posts)
+
+        logger.info("content_generation: completed", total_posts=len(merged), revised=len(new_posts))
+        out: dict = {"generated_posts": merged}
+        if errors:
+            out["errors"] = errors
+        return out
+
+    # First run: generate all posts, in bounded batches so large scans stay
+    # within the output token limit and one bad batch fails only its own posts.
+    brand_voice = _build_brand_voice_instructions(strategy)
+    system_prompt = CONTENT_GENERATION_SYSTEM_PROMPT.format(
+        brand_voice_instructions=brand_voice
+    )
+    trend_promoted = {
+        t.get("title", ""): t.get("is_promoted", False) for t in analyzed_trends
+    }
+
+    async def _gen_batch(batch: list, idx: int) -> dict:
+        try:
+            user_content = _build_generation_input(batch, analyzed_trends, strategy)
+            response = await llm.ainvoke([
                 SystemMessage(content=system_prompt),
                 HumanMessage(content=user_content),
+            ])
+            posts = _parse_json_response(response.content)
+            if not isinstance(posts, list):
+                posts = [posts]
+            for post in posts:
+                post["is_promoted"] = trend_promoted.get(post.get("trend_title", ""), False)
+            return {"posts": posts, "error": None}
+        except Exception as e:
+            logger.error("content_generation: batch failed", batch=idx, error=str(e))
+            placeholders = [
+                _make_failed_placeholder(item, analyzed_trends, e, idx, i)
+                for i, item in enumerate(batch)
             ]
+            return {"posts": placeholders, "error": {"node": "content_generation", "error": str(e)}}
 
-        response = await llm.ainvoke(messages)
-        new_posts = _parse_json_response(response.content)
+    batch_results = await run_batches(content_plan, _gen_batch)
+    result_posts: list[dict] = []
+    errors = []
+    for r in batch_results:
+        result_posts.extend(r["posts"])
+        if r["error"]:
+            errors.append(r["error"])
 
-        if not isinstance(new_posts, list):
-            new_posts = [new_posts]
-
-        if not is_revision and len(new_posts) != len(content_plan):
-            logger.warning(
-                "content_generation: post count mismatch with content plan",
-                content_plan_size=len(content_plan),
-                generated_count=len(new_posts),
-            )
-
-        # Propagate is_promoted flag from analyzed_trends to generated posts
-        if not is_revision:
-            trend_promoted = {
-                t.get("title", ""): t.get("is_promoted", False)
-                for t in analyzed_trends
-            }
-            for post in new_posts:
-                post["is_promoted"] = trend_promoted.get(
-                    post.get("trend_title", ""), False
-                )
-
-        if is_revision:
-            # Merge revised posts back: replace old versions, keep passing ones
-            revised_ids = {p["post_id"] for p in new_posts}
-            merged = [p for p in existing_posts if p["post_id"] not in revised_ids]
-            merged.extend(new_posts)
-            result_posts = merged
-        else:
-            result_posts = new_posts
-
-        logger.info(
-            "content_generation: completed",
-            total_posts=len(result_posts),
-            revised=len(new_posts) if is_revision else 0,
-        )
-
-        return {"generated_posts": result_posts}
-
-    except Exception as e:
-        logger.error("content_generation: LLM call failed", error=str(e))
-        return {
-            "generated_posts": existing_posts,
-            "errors": [{"node": "content_generation", "error": str(e)}],
-        }
+    logger.info(
+        "content_generation: completed",
+        total_posts=len(result_posts),
+        batches=len(batch_results),
+    )
+    out = {"generated_posts": result_posts}
+    if errors:
+        out["errors"] = errors
+    return out

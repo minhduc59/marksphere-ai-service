@@ -13,9 +13,9 @@ from pydantic import BaseModel, Field
 
 class ManualPublishRequest(BaseModel):
     """Request body for manual immediate publish."""
-    privacy_level: str = Field(
-        default="SELF_ONLY",
-        description="TikTok privacy level: SELF_ONLY, MUTUAL_FOLLOW_FRIENDS, FOLLOWER_OF_CREATOR, PUBLIC_TO_EVERYONE",
+    privacy_level: str | None = Field(
+        default=None,
+        description="TikTok privacy level: SELF_ONLY, MUTUAL_FOLLOW_FRIENDS, FOLLOWER_OF_CREATOR, PUBLIC_TO_EVERYONE. Defaults to user's pipeline config.",
     )
 
 
@@ -24,12 +24,12 @@ class SchedulePublishRequest(BaseModel):
     scheduled_at: datetime = Field(
         ..., description="ISO 8601 timestamp for when to publish (must be in the future)"
     )
-    privacy_level: str = Field(default="SELF_ONLY")
+    privacy_level: str | None = Field(default=None)
 
 
 class AutoPublishRequest(BaseModel):
     """Request body for auto-publish using golden hour scheduling."""
-    privacy_level: str = Field(default="SELF_ONLY")
+    privacy_level: str | None = Field(default=None)
 
 
 # --- Responses ---

@@ -107,16 +107,17 @@ async def run_human_feedback_revision(
             log.error("revision_runner: post not found")
             return
 
-        # Only regenerate posts that the review endpoint flagged. If the user
-        # double-clicks or the task is retried, this guards against duplicate
-        # regenerations.
-        if post.status != ContentStatus.NEEDS_REVISION:
+        # Regenerate posts the review endpoint flagged (NEEDS_REVISION) or that
+        # errored mid-pipeline (FAILED, user-triggered retry). The status guard
+        # also protects against duplicate regenerations on double-click/retry.
+        if post.status not in (ContentStatus.NEEDS_REVISION, ContentStatus.FAILED):
             log.warning(
-                "revision_runner: post not in needs_revision; skipping",
+                "revision_runner: post not retryable; skipping",
                 status=post.status.value,
             )
             return
 
+        is_failed_retry = post.status == ContentStatus.FAILED
         post.status = ContentStatus.REGENERATING
         post.human_feedback = feedback
         await db.commit()
@@ -125,22 +126,36 @@ async def run_human_feedback_revision(
         scan_run_id = str(post.scan_run_id)
         current_revision_count = post.revision_count or 0
 
-    log.info("revision_runner: regenerating", scan_run_id=scan_run_id)
+    log.info("revision_runner: regenerating", scan_run_id=scan_run_id, failed_retry=is_failed_retry)
 
-    # --- Step 3: classify feedback ------------------------------------------
-    try:
-        targets = await classify_feedback(feedback, post_snapshot)
-    except Exception as exc:  # noqa: BLE001 — classifier has its own fallback, this catches anything else
-        log.error("revision_runner: classifier crashed", error=str(exc))
-        await _set_status(
-            post_uuid,
-            ContentStatus.FLAGGED_FOR_REVIEW,
-            review_notes=f"Feedback classifier failed: {exc}",
-        )
-        return
+    # --- Step 3: decide what to regenerate ----------------------------------
+    if is_failed_retry:
+        # A failed post was never fully produced — regenerate everything from
+        # scratch. Skip the feedback classifier (there is no quality feedback).
+        targets = {"regenerate_content": True, "regenerate_image": True, "reasoning": "retry after failure"}
+    else:
+        try:
+            targets = await classify_feedback(feedback, post_snapshot)
+        except Exception as exc:  # noqa: BLE001 — classifier has its own fallback, this catches anything else
+            log.error("revision_runner: classifier crashed", error=str(exc))
+            await _set_status(
+                post_uuid,
+                ContentStatus.FLAGGED_FOR_REVIEW,
+                review_notes=f"Feedback classifier failed: {exc}",
+            )
+            return
 
     regen_content = bool(targets.get("regenerate_content"))
     regen_image = bool(targets.get("regenerate_image"))
+
+    # The revision content builder pulls trend context by matching trend_title
+    # against analyzed_trends; a failed retry needs those loaded (the normal
+    # revision path already has a real caption to work from).
+    analyzed_trends: list[dict] = []
+    if is_failed_retry:
+        from app.agents.post_generator.nodes.strategy_alignment import _load_analyzed_trends
+
+        analyzed_trends = await _load_analyzed_trends(scan_run_id)
 
     # --- Step 4: run only the targeted nodes --------------------------------
     state: PostGenState = {  # type: ignore[typeddict-item]  # partial state is fine for these nodes
@@ -148,7 +163,7 @@ async def run_human_feedback_revision(
         "user_id": None,
         "options": {},
         "trend_report_md": "",
-        "analyzed_trends": [],
+        "analyzed_trends": analyzed_trends,
         "strategy": {},
         "content_plan": [],
         "generated_posts": [post_snapshot],
@@ -236,6 +251,9 @@ async def run_human_feedback_revision(
             row.status = ContentStatus.DRAFT
             # Clear stale auto-review feedback so the UI shows a fresh slate.
             row.review_notes = None
+            # Clear failure markers — a successful retry is no longer failed.
+            row.failed_stage = None
+            row.error_reason = None
 
             await db.commit()
     except Exception as exc:  # noqa: BLE001 — persistence failures must surface as flagged

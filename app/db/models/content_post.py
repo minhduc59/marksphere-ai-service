@@ -67,6 +67,11 @@ class ContentPost(Base):
     human_feedback: Mapped[str | None] = mapped_column(Text, nullable=True)
     last_revision_targets: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
 
+    # Error tracking — set when status=FAILED. failed_stage names the pipeline
+    # node that errored (e.g. content_generation, image_generation).
+    failed_stage: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    error_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+
     # Promotion flag — True if generated from a promoted (lower-quality) trend
     is_promoted: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
 

@@ -1,5 +1,5 @@
 import operator
-from typing import Annotated, TypedDict
+from typing import Annotated, NotRequired, TypedDict
 
 
 class RawTrendData(TypedDict):
@@ -10,8 +10,12 @@ class RawTrendData(TypedDict):
 
 
 class ScanError(TypedDict):
-    platform: str
     error: str
+    # Origin of the error — scanners/post-gen set ``platform``, analyzer sets
+    # ``node``; ``fatal`` flags non-retryable config/billing failures.
+    platform: NotRequired[str]
+    node: NotRequired[str]
+    fatal: NotRequired[bool]
 
 
 class TrendScanState(TypedDict):
@@ -39,6 +43,9 @@ class TrendScanState(TypedDict):
     generate_posts: bool  # Whether to run the post generation pipeline
     post_gen_options: dict  # {num_posts, formats}
     post_gen_output: dict  # Final output from post generation (content_plan, posts, strategy_update)
+
+    # Pipeline config (loaded from ai.pipeline_configs at scan start)
+    pipeline_config: dict | None
 
     # Control
     errors: Annotated[list[ScanError], operator.add]
