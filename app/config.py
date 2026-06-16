@@ -40,6 +40,13 @@ class Settings(BaseSettings):
     # Firecrawl
     FIRECRAWL_API_KEY: str = ""
 
+    # Modal (GPU inference)
+    MODAL_TOKEN_ID: str = ""
+    MODAL_TOKEN_SECRET: str = ""
+    MODAL_APP_NAME: str = ""
+    MODAL_FUNCTION_NAME: str = ""
+    MODAL_CHECKPOINT: str = ""
+
     # S3 (production storage)
     S3_BUCKET: str = ""
     S3_REGION: str = "ap-southeast-1"
