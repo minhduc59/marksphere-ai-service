@@ -40,6 +40,19 @@ class Settings(BaseSettings):
     # Firecrawl
     FIRECRAWL_API_KEY: str = ""
 
+    # Modal (FLUX.2-klein fine-tuned image generation)
+    MODAL_TOKEN_ID: str = ""
+    MODAL_TOKEN_SECRET: str = ""
+    MODAL_APP_NAME: str = ""
+    MODAL_FUNCTION_NAME: str = ""
+    MODAL_CHECKPOINT: str = ""
+
+    # S3 (production storage)
+    S3_BUCKET: str = ""
+    S3_REGION: str = "ap-southeast-1"
+    S3_PREFIX: str = "trending-scanner"
+
+    # Cloudinary (temporary image hosting; replaces local disk for generated post images)
     # Cloudinary (all storage — reports, posts, images, video clips)
     CLOUDINARY_CLOUD_NAME: str | None = None
     CLOUDINARY_API_KEY: str | None = None
@@ -79,13 +92,6 @@ class Settings(BaseSettings):
     # (bounded concurrency, off the API event loop) instead of in-process
     # FastAPI BackgroundTasks. Requires the ai-worker-scan service to be running.
     USE_ARQ_FOR_SCANS: bool = False
-
-    # Modal (FLUX.2-klein fine-tuned image generation)
-    MODAL_TOKEN_ID: str = "ak-grXiamMsEBP7ZaxGW5OlRO"
-    MODAL_TOKEN_SECRET: str = "as-krPueeGzNY4iRy1hzmujbT"
-    MODAL_APP_NAME: str = "flux-eval"
-    MODAL_FUNCTION_NAME: str = "generate_finetuned"
-    MODAL_CHECKPOINT: str = "checkpoint-2250"
 
     # AssemblyAI (video transcription)
     ASSEMBLY_AI_API_KEY: str = ""
