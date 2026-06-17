@@ -38,13 +38,14 @@ def _extract_video_id(url: str) -> str:
     return match.group(1)
 
 
-def _resolve_best_mp4(video_id: str, settings) -> dict:
-    """Resolve the best progressive mp4 (<=1080p) format via RapidAPI.
+def _resolve_mp4_candidates(video_id: str, settings) -> list[dict]:
+    """Resolve progressive mp4 formats via RapidAPI, best quality first.
 
-    Returns the chosen format dict (with a fresh, signed `url`). Each call mints
-    a new short-lived media URL, so we re-call this to recover from a 403 on the
-    media fetch. ("formats" = progressive audio+video; "adaptiveFormats" = split
-    tracks, which we skip so the pipeline needs no ffmpeg merge step.)
+    Returns all progressive mp4 formats (prefer <=1080p) sorted highest-first,
+    each with a fresh, signed `url`. Each call mints new short-lived media URLs,
+    so we re-call this to recover from a 403 on the media fetch. ("formats" =
+    progressive audio+video; "adaptiveFormats" = split tracks, which we skip so
+    the pipeline needs no ffmpeg merge step.)
     """
     with httpx.Client(timeout=60.0) as client:
         resp = client.get(
@@ -72,17 +73,23 @@ def _resolve_best_mp4(video_id: str, settings) -> dict:
         raise RuntimeError("RapidAPI returned no progressive mp4 format for this video")
 
     candidates = [fmt for fmt in mp4s if _height(fmt) <= 1080] or mp4s
-    return max(candidates, key=_height)
+    return sorted(candidates, key=_height, reverse=True)
 
 
 def _stream_media(media_url: str, output_path: Path) -> None:
-    """Stream a googlevideo media URL to disk using the Android VR UA.
+    """Stream a googlevideo media URL to disk.
 
-    Raises httpx.HTTPStatusError (e.g. 403) so the caller can re-resolve a fresh
-    URL and retry.
+    Sends the Android VR client User-Agent (the provider mints URLs for that
+    client) and a `Range: bytes=0-` header — googlevideo's progressive endpoint
+    403s a plain GET for these client params, mirroring what the real Android
+    client always sends. A 206 Partial Content response is a success here.
+
+    Raises httpx.HTTPStatusError (e.g. 403) so the caller can try another format
+    or re-resolve a fresh URL.
     """
+    headers = {"User-Agent": _ANDROID_VR_UA, "Range": "bytes=0-"}
     with httpx.Client(timeout=None, follow_redirects=True) as client:
-        with client.stream("GET", media_url, headers={"User-Agent": _ANDROID_VR_UA}) as media:
+        with client.stream("GET", media_url, headers=headers) as media:
             media.raise_for_status()
             with open(output_path, "wb") as fh:
                 for chunk in media.iter_bytes(chunk_size=1 << 20):
@@ -98,8 +105,8 @@ def _download_youtube(url: str, output_path: Path) -> None:
     so the rest of the pipeline needs no ffmpeg merge step.
 
     The resolved googlevideo URLs are signed/short-lived and occasionally 403
-    (expiry or client/IP-context mismatch), so on a 403 we re-resolve a fresh
-    URL once and retry the byte stream.
+    (expiry, client/IP-context mismatch). To recover we try every resolved mp4
+    format in turn, then re-resolve a fresh batch of URLs once before giving up.
     """
     from app.config import get_settings
 
@@ -111,26 +118,28 @@ def _download_youtube(url: str, output_path: Path) -> None:
 
     last_error: httpx.HTTPStatusError | None = None
     for attempt in range(2):
-        best = _resolve_best_mp4(video_id, settings)
-        logger.info(
-            "download: resolved youtube media url",
-            video_id=video_id,
-            quality=best.get("qualityLabel"),
-            height=int(best.get("height") or 0),
-            attempt=attempt,
-        )
-        try:
-            _stream_media(best["url"], output_path)
-            return
-        except httpx.HTTPStatusError as exc:
-            if exc.response.status_code != 403:
-                raise
-            last_error = exc
-            logger.warning(
-                "download: media url returned 403, re-resolving",
+        candidates = _resolve_mp4_candidates(video_id, settings)
+        for fmt in candidates:
+            logger.info(
+                "download: trying youtube media url",
                 video_id=video_id,
+                itag=fmt.get("itag"),
+                quality=fmt.get("qualityLabel"),
                 attempt=attempt,
             )
+            try:
+                _stream_media(fmt["url"], output_path)
+                return
+            except httpx.HTTPStatusError as exc:
+                if exc.response.status_code != 403:
+                    raise
+                last_error = exc
+                logger.warning(
+                    "download: media url returned 403",
+                    video_id=video_id,
+                    itag=fmt.get("itag"),
+                    attempt=attempt,
+                )
 
     raise RuntimeError(
         f"YouTube media download failed with 403 after re-resolving for {video_id}"
