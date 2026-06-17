@@ -30,10 +30,10 @@ def test_segment_rejects_too_short():
         SegmentSelection(start_ms=0, end_ms=5000, score=50.0, rationale="test")
 
 
-def test_segment_rejects_too_long():
-    # 91 000 ms = 91s — above 90s maximum
-    with pytest.raises(ValidationError, match="Clip too long"):
-        SegmentSelection(start_ms=0, end_ms=91000, score=50.0, rationale="test")
+def test_segment_trims_too_long():
+    # 200 000 ms = 200s — above 180s maximum; should be trimmed to 180s
+    seg = SegmentSelection(start_ms=0, end_ms=200000, score=50.0, rationale="test")
+    assert seg.end_ms == 180000
 
 
 def test_segment_accepts_minimum_boundary():
@@ -42,8 +42,8 @@ def test_segment_accepts_minimum_boundary():
 
 
 def test_segment_accepts_maximum_boundary():
-    seg = SegmentSelection(start_ms=0, end_ms=90000, score=90.0, rationale="ok")
-    assert (seg.end_ms - seg.start_ms) == 90000
+    seg = SegmentSelection(start_ms=0, end_ms=180000, score=90.0, rationale="ok")
+    assert (seg.end_ms - seg.start_ms) == 180000
 
 
 def test_segment_score_out_of_range_rejected():

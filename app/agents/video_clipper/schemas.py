@@ -29,8 +29,8 @@ class SegmentSelection(BaseModel):
         duration_s = (self.end_ms - self.start_ms) / 1000
         if duration_s < 10:
             raise ValueError(f"Clip too short: {duration_s:.1f}s (minimum 10s)")
-        if duration_s > 90:
-            raise ValueError(f"Clip too long: {duration_s:.1f}s (maximum 90s)")
+        if duration_s > 180:
+            self.end_ms = self.start_ms + 180_000
         return self
 
 
