@@ -201,7 +201,10 @@ async def video_clipper_node(state: VideoClipperState) -> dict:
             await _update_task(task_id, VideoTaskStatus.ERROR.value, 0, error_msg)
         except Exception:
             pass
-        raise
+        # Re-raise a clean error: some exceptions (e.g. yt-dlp DownloadError)
+        # carry an unpicklable traceback object that breaks arq's result
+        # serializer. `from None` drops the chain so the result serializes.
+        raise RuntimeError(error_msg) from None
 
     finally:
         shutil.rmtree(task_temp_dir, ignore_errors=True)

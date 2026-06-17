@@ -99,6 +99,10 @@ class Settings(BaseSettings):
     # Video Clipper
     VIDEO_TEMP_DIR: str = "/tmp/marketing-video-clipper"
 
+    # RapidAPI — used to resolve YouTube media URLs for download (YouTube blocks
+    # datacenter/AWS IPs, so we go through a RapidAPI provider instead of yt-dlp).
+    RAPIDAPI_KEY: str = ""
+
     @property
     def is_production(self) -> bool:
         return self.APP_ENV == "production"
