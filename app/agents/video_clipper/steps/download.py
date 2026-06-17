@@ -18,6 +18,15 @@ _FFMPEG_TIMEOUT_S = 600
 # https://rapidapi.com/ytjar/api/ytstream-download-youtube-videos
 _RAPIDAPI_YT_HOST = "ytstream-download-youtube-videos.p.rapidapi.com"
 
+# The provider mints media URLs for the ANDROID_VR client (visible as
+# `c=ANDROID_VR` in the resolved googlevideo URL). YouTube returns 403 if the
+# fetch User-Agent doesn't match the client the URL was signed for, so we stream
+# the bytes with the matching Android VR UA.
+_ANDROID_VR_UA = (
+    "com.google.android.apps.youtube.vr.oculus/1.62.27 "
+    "(Linux; U; Android 12; SM-G973F) gzip"
+)
+
 _YT_ID_RE = re.compile(r"(?:v=|/shorts/|/embed/|/v/|youtu\.be/)([A-Za-z0-9_-]{11})")
 
 
@@ -29,23 +38,14 @@ def _extract_video_id(url: str) -> str:
     return match.group(1)
 
 
-def _download_youtube(url: str, output_path: Path) -> None:
-    """Download a YouTube video via the RapidAPI ytstream downloader.
+def _resolve_best_mp4(video_id: str, settings) -> dict:
+    """Resolve the best progressive mp4 (<=1080p) format via RapidAPI.
 
-    YouTube blocks datacenter/AWS IPs directly, so we resolve a direct media
-    URL through RapidAPI (the provider handles bot detection) and stream the
-    file down ourselves. We pick a progressive mp4 (audio+video in one file),
-    so the rest of the pipeline needs no ffmpeg merge step.
+    Returns the chosen format dict (with a fresh, signed `url`). Each call mints
+    a new short-lived media URL, so we re-call this to recover from a 403 on the
+    media fetch. ("formats" = progressive audio+video; "adaptiveFormats" = split
+    tracks, which we skip so the pipeline needs no ffmpeg merge step.)
     """
-    from app.config import get_settings
-
-    settings = get_settings()
-    if not settings.RAPIDAPI_KEY:
-        raise RuntimeError("RAPIDAPI_KEY is not configured — cannot download YouTube videos")
-
-    video_id = _extract_video_id(url)
-
-    # 1) Resolve the available formats for this video.
     with httpx.Client(timeout=60.0) as client:
         resp = client.get(
             f"https://{_RAPIDAPI_YT_HOST}/dl",
@@ -61,8 +61,6 @@ def _download_youtube(url: str, output_path: Path) -> None:
     if data.get("status") == "fail":
         raise RuntimeError(f"RapidAPI YouTube download failed: {data.get('msg') or data}")
 
-    # 2) Pick the best progressive mp4 (<=1080p) — these carry audio+video in a
-    #    single file. ("formats" = progressive; "adaptiveFormats" = split tracks.)
     def _height(fmt: dict) -> int:
         return int(fmt.get("height") or 0)
 
@@ -74,22 +72,69 @@ def _download_youtube(url: str, output_path: Path) -> None:
         raise RuntimeError("RapidAPI returned no progressive mp4 format for this video")
 
     candidates = [fmt for fmt in mp4s if _height(fmt) <= 1080] or mp4s
-    best = max(candidates, key=_height)
+    return max(candidates, key=_height)
 
-    logger.info(
-        "download: resolved youtube media url",
-        video_id=video_id,
-        quality=best.get("qualityLabel"),
-        height=_height(best),
-    )
 
-    # 3) Stream the media file to disk.
+def _stream_media(media_url: str, output_path: Path) -> None:
+    """Stream a googlevideo media URL to disk using the Android VR UA.
+
+    Raises httpx.HTTPStatusError (e.g. 403) so the caller can re-resolve a fresh
+    URL and retry.
+    """
     with httpx.Client(timeout=None, follow_redirects=True) as client:
-        with client.stream("GET", best["url"]) as media:
+        with client.stream("GET", media_url, headers={"User-Agent": _ANDROID_VR_UA}) as media:
             media.raise_for_status()
             with open(output_path, "wb") as fh:
                 for chunk in media.iter_bytes(chunk_size=1 << 20):
                     fh.write(chunk)
+
+
+def _download_youtube(url: str, output_path: Path) -> None:
+    """Download a YouTube video via the RapidAPI ytstream downloader.
+
+    YouTube blocks datacenter/AWS IPs directly, so we resolve a direct media
+    URL through RapidAPI (the provider handles bot detection) and stream the
+    file down ourselves. We pick a progressive mp4 (audio+video in one file),
+    so the rest of the pipeline needs no ffmpeg merge step.
+
+    The resolved googlevideo URLs are signed/short-lived and occasionally 403
+    (expiry or client/IP-context mismatch), so on a 403 we re-resolve a fresh
+    URL once and retry the byte stream.
+    """
+    from app.config import get_settings
+
+    settings = get_settings()
+    if not settings.RAPIDAPI_KEY:
+        raise RuntimeError("RAPIDAPI_KEY is not configured — cannot download YouTube videos")
+
+    video_id = _extract_video_id(url)
+
+    last_error: httpx.HTTPStatusError | None = None
+    for attempt in range(2):
+        best = _resolve_best_mp4(video_id, settings)
+        logger.info(
+            "download: resolved youtube media url",
+            video_id=video_id,
+            quality=best.get("qualityLabel"),
+            height=int(best.get("height") or 0),
+            attempt=attempt,
+        )
+        try:
+            _stream_media(best["url"], output_path)
+            return
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code != 403:
+                raise
+            last_error = exc
+            logger.warning(
+                "download: media url returned 403, re-resolving",
+                video_id=video_id,
+                attempt=attempt,
+            )
+
+    raise RuntimeError(
+        f"YouTube media download failed with 403 after re-resolving for {video_id}"
+    ) from last_error
 
 
 def _retrieve_upload(cloudinary_public_id: str, output_path: Path) -> None:
