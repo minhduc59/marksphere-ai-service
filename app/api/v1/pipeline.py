@@ -417,4 +417,5 @@ async def get_pipeline_run_status(
         started_at=pipeline_run.started_at,
         completed_at=pipeline_run.completed_at,
         duration_ms=pipeline_run.duration_ms,
+        source_type=scan_run.source_type if scan_run is not None else None,
     )
