@@ -44,6 +44,7 @@ class PipelineRunStatusResponse(BaseModel):
     started_at: datetime | None = None
     completed_at: datetime | None = None
     duration_ms: int | None = None
+    source_type: str | None = None
 
 
 class PipelineRunSummary(BaseModel):

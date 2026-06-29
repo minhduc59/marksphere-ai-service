@@ -96,3 +96,4 @@ class ScanStatusResponse(BaseModel):
     error: str | None = None
     current_step: str | None = None
     published_post_ids: list[str] = []
+    source_type: str | None = None

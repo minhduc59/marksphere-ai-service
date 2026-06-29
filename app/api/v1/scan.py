@@ -158,4 +158,5 @@ async def get_scan_status(
         error=scan_run.error,
         current_step=scan_run.current_step,
         published_post_ids=[str(pid) for pid in published_rows],
+        source_type=scan_run.source_type,
     )

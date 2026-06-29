@@ -202,15 +202,16 @@ async def run_article_pipeline(
             stage="scanning",
             scan_run_id=scan_run_id,
         )
-        # Light up the Trending Scanner stage while the article is fetched and the
-        # report is built; post-gen's _step_cb advances it from here. "analyzing"
-        # ("Analyze trends") reads correctly for a single article.
-        await _update_step(scan_run_id, "analyzing")
+        # "crawling" lights up the "Crawl Article" stage while the article is
+        # being fetched; then "analyzing" lights up "Analyze trends" while the
+        # report is being built.
+        await _update_step(scan_run_id, "crawling")
 
         article = await fetch_article(url)
         if detect_paywall(article["body"]):
             raise PaywallDetectedError("Article appears to be paywalled or empty")
 
+        await _update_step(scan_run_id, "analyzing")
         report = await build_article_report(article)
 
         report_path = f"article-reports/{scan_run_id}.json"
